@@ -6,6 +6,7 @@ import { StripeProvider } from '@stripe/stripe-react-native';
 import { COLORS } from '../lib/constants';
 import { supabase } from '../lib/supabase';
 import { useAppStore } from '../store/useAppStore';
+import { ThemedAlertProvider } from '../components/ui/ThemedAlertProvider';
 
 const STRIPE_KEY = process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY || '';
 
@@ -26,10 +27,12 @@ export default function RootLayout() {
       publishableKey={STRIPE_KEY}
       merchantIdentifier="merchant.com.fieldmind.app"
     >
-      <View style={{ flex: 1, backgroundColor: COLORS.background }}>
-        <StatusBar style="light" />
-        <Stack screenOptions={{ headerShown: false }} />
-      </View>
+      <ThemedAlertProvider>
+        <View style={{ flex: 1, backgroundColor: COLORS.background }}>
+          <StatusBar style="light" />
+          <Stack screenOptions={{ headerShown: false }} />
+        </View>
+      </ThemedAlertProvider>
     </StripeProvider>
   );
 }
