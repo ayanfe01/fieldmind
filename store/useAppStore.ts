@@ -733,8 +733,11 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
           messages: s.messages.map(item => item.id === message.id ? savedMessage : item),
         }));
       }
+      // Save conversation first — messages RLS checks conversation existence.
+      // Awaiting here prevents the race where saveMessage reaches Supabase before
+      // the conversation row is committed.
+      if (nextConversation) await saveConversation(nextConversation.ownerId || user.id, nextConversation);
       void saveMessage(user.id, savedMessage);
-      if (nextConversation) void saveConversation(nextConversation.ownerId || user.id, nextConversation);
     }
   },
 
