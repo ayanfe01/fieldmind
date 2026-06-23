@@ -61,6 +61,13 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="jobs"
+        options={{
+          title: 'Jobs',
+          tabBarIcon: ({ focused }) => <TabIcon name="briefcase-search-outline" focused={focused} />,
+        }}
+      />
+      <Tabs.Screen
         name="quotes"
         options={{
           title: 'Quotes',
@@ -69,15 +76,7 @@ export default function TabLayout() {
       />
       <Tabs.Screen
         name="voice"
-        options={{
-          title: 'Voice',
-          tabBarIcon: () => (
-            <View style={styles.voiceButton}>
-              <MaterialCommunityIcons name="microphone-outline" size={25} color="#071210" />
-            </View>
-          ),
-          tabBarLabel: () => null,
-        }}
+        options={{ href: null }}
       />
       <Tabs.Screen
         name="messages"
@@ -88,7 +87,10 @@ export default function TabLayout() {
       />
       <Tabs.Screen
         name="invoices"
-        options={{ href: null }}
+        options={{
+          title: 'Invoices',
+          tabBarIcon: ({ focused }) => <TabIcon name="receipt-text-outline" focused={focused} />,
+        }}
       />
       <Tabs.Screen
         name="schedule"
@@ -125,18 +127,4 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   tabIconActive: { backgroundColor: COLORS.primary + '16' },
-  voiceButton: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: COLORS.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 8,
-    shadowColor: COLORS.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.22,
-    shadowRadius: 10,
-    elevation: 5,
-  },
 });

@@ -14,6 +14,22 @@ export interface CloudState {
   profilePhoto: string | null;
 }
 
+export interface PublicServicePro {
+  id: string;
+  name: string;
+  businessName?: string;
+  trade?: string;
+  trades?: string[];
+  customTrade?: string;
+  pricingMode?: string;
+  hourlyRate?: number;
+  fixedRate?: number;
+  yearsExperience?: number;
+  serviceArea?: string;
+  bio?: string;
+  profilePhoto?: string | null;
+}
+
 const logCloudError = (action: string, error: unknown) => {
   if (error) {
     console.warn(`[FieldMind cloud] ${action} failed`, error);
@@ -24,15 +40,69 @@ const withoutUndefined = <T extends Record<string, unknown>>(input: T) => (
   Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined)) as T
 );
 
+const localUriToBlob = (uri: string) => new Promise<Blob>((resolve, reject) => {
+  const xhr = new XMLHttpRequest();
+  xhr.onload = () => resolve(xhr.response);
+  xhr.onerror = () => reject(new Error('Could not read the selected image from this device.'));
+  xhr.responseType = 'blob';
+  xhr.open('GET', uri);
+  xhr.send();
+});
+
+export const uploadProfilePhoto = async (userId: string, uri: string) => {
+  if (/^https?:\/\//i.test(uri)) return uri;
+
+  const blob = await localUriToBlob(uri);
+  const mimeType = blob.type || 'image/jpeg';
+  const extension = mimeType.includes('png') ? 'png' : 'jpg';
+  const path = `${userId}/profile.${extension}`;
+
+  const { error } = await supabase.storage
+    .from('profile-photos')
+    .upload(path, blob, {
+      contentType: mimeType,
+      upsert: true,
+    });
+
+  if (error) throw error;
+
+  const { data } = supabase.storage.from('profile-photos').getPublicUrl(path);
+  return `${data.publicUrl}?v=${Date.now()}`;
+};
+
+export const uploadChatImage = async (userId: string, uri: string) => {
+  if (/^https?:\/\//i.test(uri)) return uri;
+
+  const blob = await localUriToBlob(uri);
+  const mimeType = blob.type || 'image/jpeg';
+  const extension = mimeType.includes('png') ? 'png' : 'jpg';
+  const path = `${userId}/${Date.now()}-${Math.random().toString(36).slice(2)}.${extension}`;
+
+  const { error } = await supabase.storage
+    .from('chat-attachments')
+    .upload(path, blob, {
+      contentType: mimeType,
+      upsert: false,
+    });
+
+  if (error) throw error;
+
+  const { data } = supabase.storage.from('chat-attachments').getPublicUrl(path);
+  return data.publicUrl;
+};
+
 export const upsertProfile = async (user: User, profilePhoto?: string | null) => {
   const { error } = await supabase.from('profiles').upsert(withoutUndefined({
     id: user.id,
     role: user.role,
+    roles: user.roles?.length ? user.roles : [user.role],
     name: user.name,
     email: user.email,
     phone: user.phone,
     business_name: user.businessName,
     trade: user.trade,
+    trades: user.trades,
+    custom_trade: user.customTrade,
     pricing_mode: user.pricingMode,
     hourly_rate: user.hourlyRate,
     fixed_rate: user.fixedRate,
@@ -49,6 +119,7 @@ export const upsertProfile = async (user: User, profilePhoto?: string | null) =>
 };
 
 export const fetchCloudState = async (): Promise<Partial<CloudState>> => {
+  const currentUserId = (await supabase.auth.getUser()).data.user?.id;
   const [
     clientsResult,
     quotesResult,
@@ -68,7 +139,7 @@ export const fetchCloudState = async (): Promise<Partial<CloudState>> => {
     supabase.from('portfolio_items').select('*').order('created_at', { ascending: false }),
     supabase.from('conversations').select('*').order('updated_at', { ascending: false }),
     supabase.from('messages').select('*').order('created_at', { ascending: true }),
-    supabase.from('profiles').select('profile_photo').maybeSingle(),
+    supabase.from('profiles').select('profile_photo').eq('id', currentUserId || '').maybeSingle(),
   ]);
 
   logCloudError('fetch clients', clientsResult.error);
@@ -131,6 +202,7 @@ export const fetchCloudState = async (): Promise<Partial<CloudState>> => {
     })),
     jobs: (jobsResult.data || []).map(row => ({
       id: row.id,
+      ownerId: row.owner_id,
       clientId: row.client_id,
       title: row.title,
       description: row.description,
@@ -141,6 +213,13 @@ export const fetchCloudState = async (): Promise<Partial<CloudState>> => {
       address: row.address,
       quoteId: row.quote_id || undefined,
       invoiceId: row.invoice_id || undefined,
+      assignedProId: row.assigned_pro_id || undefined,
+      assignedProName: row.assigned_pro_name || undefined,
+      assignedAt: row.assigned_at || undefined,
+      category: row.category || undefined,
+      customCategory: row.custom_category || undefined,
+      budgetRange: row.budget_range || undefined,
+      urgency: row.urgency || undefined,
       notes: row.notes || undefined,
       createdAt: row.created_at,
       customerMedia: row.customer_media || undefined,
@@ -165,9 +244,15 @@ export const fetchCloudState = async (): Promise<Partial<CloudState>> => {
     })),
     conversations: (conversationsResult.data || []).map(row => ({
       id: row.id,
-      participantId: row.participant_id,
-      participantName: row.participant_name,
+      ownerId: row.owner_id,
+      initiatorName: row.initiator_name || undefined,
+      initiatorPhoto: row.initiator_photo || null,
+      participantId: row.owner_id === currentUserId ? row.participant_id : row.owner_id,
+      participantName: row.owner_id === currentUserId ? row.participant_name : (row.initiator_name || 'FieldMind User'),
+      participantPhoto: row.owner_id === currentUserId ? (row.participant_photo || null) : (row.initiator_photo || null),
       participantRole: row.participant_role,
+      participantUserIds: row.participant_user_ids || undefined,
+      jobId: row.job_id || undefined,
       subject: row.subject || undefined,
       quoteRequested: row.quote_requested,
       lastMessage: row.last_message || undefined,
@@ -180,10 +265,41 @@ export const fetchCloudState = async (): Promise<Partial<CloudState>> => {
       senderId: row.sender_id,
       senderName: row.sender_name,
       text: row.text,
+      mediaUri: row.media_uri || undefined,
+      mediaType: row.media_type || undefined,
+      actionType: row.action_type || undefined,
+      actionLabel: row.action_label || undefined,
+      actionPayload: row.action_payload || undefined,
       createdAt: row.created_at,
     })),
     profilePhoto: profileResult.data?.profile_photo || null,
   };
+};
+
+export const fetchPublicServicePros = async (): Promise<PublicServicePro[]> => {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('id,name,business_name,trade,trades,custom_trade,pricing_mode,hourly_rate,fixed_rate,years_experience,service_area,bio,profile_photo')
+    .contains('roles', ['tradesperson'])
+    .order('updated_at', { ascending: false });
+
+  logCloudError('fetch service pros', error);
+
+  return (data || []).map(row => ({
+    id: row.id,
+    name: row.name,
+    businessName: row.business_name || undefined,
+    trade: row.trade || undefined,
+    trades: row.trades || undefined,
+    customTrade: row.custom_trade || undefined,
+    pricingMode: row.pricing_mode || undefined,
+    hourlyRate: row.hourly_rate == null ? undefined : Number(row.hourly_rate),
+    fixedRate: row.fixed_rate == null ? undefined : Number(row.fixed_rate),
+    yearsExperience: row.years_experience == null ? undefined : Number(row.years_experience),
+    serviceArea: row.service_area || undefined,
+    bio: row.bio || undefined,
+    profilePhoto: row.profile_photo || null,
+  }));
 };
 
 export const saveClient = async (ownerId: string, client: Client) => {
@@ -251,7 +367,7 @@ export const saveInvoice = async (ownerId: string, invoice: Invoice) => {
 export const saveJob = async (ownerId: string, job: Job) => {
   const { error } = await supabase.from('jobs').upsert(withoutUndefined({
     id: job.id,
-    owner_id: ownerId,
+    owner_id: job.ownerId || ownerId,
     client_id: job.clientId,
     title: job.title,
     description: job.description,
@@ -262,6 +378,13 @@ export const saveJob = async (ownerId: string, job: Job) => {
     address: job.address,
     quote_id: job.quoteId,
     invoice_id: job.invoiceId,
+    assigned_pro_id: job.assignedProId,
+    assigned_pro_name: job.assignedProName,
+    assigned_at: job.assignedAt,
+    category: job.category,
+    custom_category: job.customCategory,
+    budget_range: job.budgetRange,
+    urgency: job.urgency,
     notes: job.notes,
     customer_media: job.customerMedia || [],
     completion_media: job.completionMedia || [],
@@ -298,12 +421,18 @@ export const savePortfolioItem = async (ownerId: string, item: PortfolioItem) =>
 };
 
 export const saveConversation = async (ownerId: string, conversation: Conversation) => {
+  const owningUserId = conversation.ownerId || ownerId;
   const { error } = await supabase.from('conversations').upsert(withoutUndefined({
     id: conversation.id,
-    owner_id: ownerId,
+    owner_id: owningUserId,
+    initiator_name: conversation.initiatorName,
+    initiator_photo: conversation.initiatorPhoto,
     participant_id: conversation.participantId,
     participant_name: conversation.participantName,
+    participant_photo: conversation.participantPhoto,
     participant_role: conversation.participantRole,
+    participant_user_ids: conversation.participantUserIds?.length ? conversation.participantUserIds : [owningUserId],
+    job_id: conversation.jobId,
     subject: conversation.subject,
     quote_requested: conversation.quoteRequested || false,
     last_message: conversation.lastMessage,
@@ -321,6 +450,11 @@ export const saveMessage = async (ownerId: string, message: ChatMessage) => {
     sender_id: message.senderId,
     sender_name: message.senderName,
     text: message.text,
+    media_uri: message.mediaUri,
+    media_type: message.mediaType,
+    action_type: message.actionType,
+    action_label: message.actionLabel,
+    action_payload: message.actionPayload,
     created_at: message.createdAt,
   });
   logCloudError('save message', error);

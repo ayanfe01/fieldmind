@@ -1,25 +1,32 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, SafeAreaView, ScrollView, TouchableOpacity, Modal, TextInput, KeyboardAvoidingView, Platform, Linking, Alert } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, TextInput, KeyboardAvoidingView, Platform, Linking } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { format, addDays, startOfWeek } from 'date-fns';
 import { useAppStore } from '../../store/useAppStore';
 import { StatusBadge } from '../../components/ui/StatusBadge';
 import { Button } from '../../components/ui/Button';
+import { useThemedAlert } from '../../components/ui/ThemedAlertProvider';
 import { COLORS, SPACING, BORDER_RADIUS } from '../../lib/constants';
 import { JobStatus } from '../../lib/types';
+import { openDirections } from '../../lib/maps';
+import { formatCurrency } from '../../lib/payments';
 
 export default function ScheduleScreen() {
   const router = useRouter();
-  const { jobs, clients, updateJob, addJob } = useAppStore();
+  const { user, jobs, clients, quotes, conversations, invoices, updateJob, addJob, addClient, addInvoice, addMessage, startConversation } = useAppStore();
+  const themedAlert = useThemedAlert();
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [showAddModal, setShowAddModal] = useState(false);
-  const [newJob, setNewJob] = useState({ title: '', address: '', time: '09:00', estimatedHours: '2' });
+  const [newJob, setNewJob] = useState({ clientName: '', clientPhone: '', title: '', address: '', time: '09:00', estimatedHours: '2' });
 
   const weekStart = startOfWeek(new Date(), { weekStartsOn: 1 });
   const weekDays = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
   const selectedDateStr = selectedDate.toISOString().split('T')[0];
-  const dayJobs = jobs.filter(j => j.scheduledDate === selectedDateStr && j.status !== 'cancelled');
+  // Show own jobs AND jobs where this user is the assigned pro
+  const ownJobs = jobs.filter(job => !job.ownerId || job.ownerId === user?.id || job.assignedProId === user?.id);
+  const dayJobs = ownJobs.filter(j => j.scheduledDate === selectedDateStr && j.status !== 'cancelled');
   const getClient = (id: string) => clients.find(c => c.id === id);
 
   const getStatusColor = (status: JobStatus) => {
@@ -31,19 +38,167 @@ export default function ScheduleScreen() {
 
   const callClient = (phone?: string) => {
     if (!phone) {
-      Alert.alert('No phone number', 'Add a phone number for this client before calling.');
+      themedAlert.show({
+        title: 'No phone number',
+        message: 'Add a phone number for this client before calling.',
+        icon: 'phone-alert-outline',
+      });
       return;
     }
     Linking.openURL(`tel:${phone}`).catch(() => {
-      Alert.alert('Call unavailable', 'Your device could not start a phone call.');
+      themedAlert.show({
+        title: 'Call unavailable',
+        message: 'Your device could not start a phone call.',
+        icon: 'phone-off-outline',
+      });
     });
   };
 
   const navigateTo = (address: string) => {
-    const url = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
-    Linking.openURL(url).catch(() => {
-      Alert.alert('Maps unavailable', 'Your device could not open maps for this job.');
+    openDirections(address).catch(() => {
+      themedAlert.show({
+        title: 'Maps unavailable',
+        message: 'Your device could not open maps for this job.',
+        icon: 'map-marker-off-outline',
+      });
     });
+  };
+
+  const sendInvoiceFromJob = async (jobId: string) => {
+    const job = jobs.find(j => j.id === jobId);
+    if (!job) return;
+    const quote = job.quoteId ? quotes.find(q => q.id === job.quoteId) : undefined;
+    const amount = quote?.total ?? 0;
+    const jobDescription = quote?.jobDescription || job.title;
+
+    // Prefer existing invoice to avoid duplicates
+    const existingInvoice = invoices.find(inv => inv.quoteId === job.quoteId && job.quoteId);
+    const invoiceId = existingInvoice?.id ?? `invoice-${Date.now()}`;
+    if (!existingInvoice) {
+      if (amount <= 0) {
+        themedAlert.show({
+          title: 'No invoice amount',
+          message: 'This job has no linked quote with a total. Go to Quotes to create and send an invoice.',
+          icon: 'receipt-text-remove-outline',
+          actions: [
+            { label: 'Go to Quotes', icon: 'file-document-edit-outline', onPress: () => router.push('/(tabs)/quotes') },
+            { label: 'Cancel', variant: 'ghost' },
+          ],
+        });
+        return;
+      }
+      addInvoice({
+        id: invoiceId,
+        quoteId: job.quoteId,
+        clientId: job.clientId || job.ownerId || '',
+        jobDescription,
+        lineItems: quote?.lineItems ?? [{ id: '1', description: jobDescription, quantity: 1, unitPrice: amount, total: amount }],
+        subtotal: quote?.subtotal ?? amount,
+        tax: quote?.tax ?? 0,
+        total: amount,
+        status: 'sent',
+        dueDate: addDays(new Date(), 7).toISOString(),
+        createdAt: new Date().toISOString(),
+        paymentTerms: quote?.paymentTerms,
+        paymentStatus: 'unpaid',
+      });
+    }
+
+    const participantId = job.ownerId || job.clientId || '';
+    if (!participantId) {
+      themedAlert.show({
+        title: 'No customer found',
+        message: 'Go to Messages to find the customer and send the invoice from the chat.',
+        icon: 'message-alert-outline',
+        actions: [
+          { label: 'Go to Messages', icon: 'message-outline', onPress: () => router.push('/(tabs)/messages') },
+          { label: 'Cancel', variant: 'ghost' },
+        ],
+      });
+      return;
+    }
+
+    const isUuid = (v?: string) => !!v && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+    // Direct conversation search: by jobId, by participantUserIds, or by participantId
+    const linkedConv = conversations.find(c => c.jobId === job.id)
+      || conversations.find(c => c.participantUserIds?.includes(participantId))
+      || conversations.find(c => c.participantId === participantId);
+
+    const conversationId = linkedConv?.id || startConversation({
+      participantId,
+      participantUserId: isUuid(participantId) ? participantId : undefined,
+      participantName: linkedConv?.participantName || 'Customer',
+      participantRole: 'customer',
+      subject: `Invoice: ${jobDescription}`,
+      jobId: job.id,
+    });
+
+    if (!conversationId) {
+      router.push('/(tabs)/messages');
+      return;
+    }
+
+    try {
+      await addMessage(
+        conversationId,
+        `The job is complete. Here is the invoice for "${jobDescription}". Please review and pay when ready.`,
+        undefined,
+        {
+          actionType: 'invoice_payment',
+          actionLabel: `Pay ${formatCurrency(amount)}`,
+          actionPayload: { invoiceId, amount, type: 'deposit' },
+        }
+      );
+      router.push({ pathname: '/chat/[conversationId]', params: { conversationId } });
+    } catch {
+      themedAlert.show({
+        title: 'Could not send invoice',
+        message: 'The invoice was created. Go to Messages to send it from the chat.',
+        icon: 'message-alert-outline',
+        actions: [
+          { label: 'Go to Messages', icon: 'message-outline', onPress: () => router.push('/(tabs)/messages') },
+          { label: 'Cancel', variant: 'ghost' },
+        ],
+      });
+    }
+  };
+
+  const resetNewJob = () => {
+    setNewJob({ clientName: '', clientPhone: '', title: '', address: '', time: '09:00', estimatedHours: '2' });
+  };
+
+  const createScheduledJob = () => {
+    if (!newJob.clientName.trim() || !newJob.title.trim() || !newJob.address.trim()) {
+      themedAlert.show({
+        title: 'Missing job details',
+        message: 'Add the client name, job title, and address before scheduling.',
+        icon: 'calendar-alert-outline',
+      });
+      return;
+    }
+    const now = new Date().toISOString();
+    const clientId = `manual-${Date.now()}`;
+    addClient({
+      id: clientId,
+      name: newJob.clientName.trim(),
+      phone: newJob.clientPhone.trim(),
+      address: newJob.address.trim(),
+      createdAt: now,
+    });
+    addJob({
+      id: '',
+      clientId,
+      title: newJob.title.trim(),
+      description: newJob.title.trim(),
+      scheduledDate: selectedDateStr,
+      scheduledTime: newJob.time.trim() || '09:00',
+      estimatedHours: parseFloat(newJob.estimatedHours) || 2,
+      status: 'scheduled',
+      address: newJob.address.trim(),
+      createdAt: now,
+    });
+    setShowAddModal(false);
+    resetNewJob();
   };
 
   return (
@@ -59,7 +214,7 @@ export default function ScheduleScreen() {
         {weekDays.map(day => {
           const dayStr = day.toISOString().split('T')[0];
           const isSelected = dayStr === selectedDateStr;
-          const hasJobs = jobs.some(j => j.scheduledDate === dayStr && j.status !== 'cancelled');
+          const hasJobs = ownJobs.some(j => j.scheduledDate === dayStr && j.status !== 'cancelled');
           return (
             <TouchableOpacity key={dayStr} style={[styles.dayBtn, isSelected && styles.dayBtnActive]} onPress={() => setSelectedDate(day)}>
               <Text style={[styles.dayLabel, isSelected && styles.dayLabelActive]}>{format(day, 'EEE')}</Text>
@@ -103,17 +258,40 @@ export default function ScheduleScreen() {
                   </View>
                   <View style={styles.jobActions}>
                     {job.status === 'scheduled' && (
-                      <TouchableOpacity style={styles.actionChip} onPress={() => updateJob(job.id, { status: 'in_progress' })}>
+                      <TouchableOpacity style={styles.actionChip} onPress={(event) => { event.stopPropagation(); updateJob(job.id, { status: 'in_progress' }); }}>
                         <Text style={styles.actionText}>Start</Text>
                       </TouchableOpacity>
                     )}
                     {job.status === 'in_progress' && (
-                      <TouchableOpacity style={[styles.actionChip, styles.actionGreen]} onPress={() => updateJob(job.id, { status: 'completed' })}>
+                      <TouchableOpacity
+                        style={[styles.actionChip, styles.actionGreen]}
+                        onPress={(event) => {
+                          event.stopPropagation();
+                          updateJob(job.id, { status: 'completed' });
+                          // Prompt to send invoice if this was a customer booking
+                          if (job.assignedProId === user?.id) {
+                            themedAlert.show({
+                              title: 'Job completed!',
+                              message: 'Send the customer an invoice to request payment.',
+                              icon: 'check-circle-outline',
+                              actions: [
+                                { label: 'Send Invoice', icon: 'receipt-text-send-outline', onPress: () => void sendInvoiceFromJob(job.id) },
+                                { label: 'Later', variant: 'ghost' },
+                              ],
+                            });
+                          }
+                        }}
+                      >
                         <Text style={[styles.actionText, { color: COLORS.success }]}>Complete</Text>
                       </TouchableOpacity>
                     )}
-                    <TouchableOpacity style={styles.actionChip} onPress={() => callClient(client?.phone)}><Text style={styles.actionText}>Call</Text></TouchableOpacity>
-                    <TouchableOpacity style={styles.actionChip} onPress={() => navigateTo(job.address)}><Text style={styles.actionText}>Navigate</Text></TouchableOpacity>
+                    {job.status === 'completed' && job.assignedProId === user?.id && (
+                      <TouchableOpacity style={[styles.actionChip, styles.actionGreen]} onPress={(event) => { event.stopPropagation(); void sendInvoiceFromJob(job.id); }}>
+                        <Text style={[styles.actionText, { color: COLORS.success }]}>Send Invoice</Text>
+                      </TouchableOpacity>
+                    )}
+                    <TouchableOpacity style={styles.actionChip} onPress={(event) => { event.stopPropagation(); callClient(client?.phone); }}><Text style={styles.actionText}>Call</Text></TouchableOpacity>
+                    <TouchableOpacity style={styles.actionChip} onPress={(event) => { event.stopPropagation(); navigateTo(job.address); }}><Text style={styles.actionText}>Navigate</Text></TouchableOpacity>
                   </View>
                 </View>
               </TouchableOpacity>
@@ -125,9 +303,19 @@ export default function ScheduleScreen() {
 
       <Modal visible={showAddModal} animationType="slide" transparent>
         <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => { setShowAddModal(false); resetNewJob(); }} />
           <View style={styles.modal}>
             <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.modalContent}>
-              <Text style={styles.modalTitle}>Schedule a Job</Text>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Schedule a Job</Text>
+                <TouchableOpacity style={styles.modalClose} onPress={() => { setShowAddModal(false); resetNewJob(); }}>
+                  <MaterialCommunityIcons name="close" size={20} color={COLORS.textSecondary} />
+                </TouchableOpacity>
+              </View>
+              <Text style={styles.inputLabel}>Client Name</Text>
+              <TextInput style={styles.input} placeholder="e.g. John Smith" placeholderTextColor={COLORS.textMuted} value={newJob.clientName} onChangeText={t => setNewJob(p => ({ ...p, clientName: t }))} />
+              <Text style={styles.inputLabel}>Client Phone (optional)</Text>
+              <TextInput style={styles.input} placeholder="+1 555 000 0000" placeholderTextColor={COLORS.textMuted} keyboardType="phone-pad" value={newJob.clientPhone} onChangeText={t => setNewJob(p => ({ ...p, clientPhone: t }))} />
               <Text style={styles.inputLabel}>Job Title</Text>
               <TextInput style={styles.input} placeholder="e.g. Fix kitchen sink" placeholderTextColor={COLORS.textMuted} value={newJob.title} onChangeText={t => setNewJob(p => ({ ...p, title: t }))} />
               <Text style={styles.inputLabel}>Address</Text>
@@ -143,13 +331,8 @@ export default function ScheduleScreen() {
                 </View>
               </View>
               <View style={styles.modalActions}>
-                <Button title="Cancel" variant="secondary" onPress={() => setShowAddModal(false)} style={{ flex: 1 }} />
-                <Button title="Add Job" style={{ flex: 1 }} onPress={() => {
-                  if (!newJob.title || !newJob.address) return;
-                  addJob({ id: '', clientId: clients[0]?.id || '1', title: newJob.title, description: newJob.title, scheduledDate: selectedDateStr, scheduledTime: newJob.time, estimatedHours: parseFloat(newJob.estimatedHours) || 2, status: 'scheduled', address: newJob.address, createdAt: new Date().toISOString() });
-                  setShowAddModal(false);
-                  setNewJob({ title: '', address: '', time: '09:00', estimatedHours: '2' });
-                }} />
+                <Button title="Cancel" variant="secondary" onPress={() => { setShowAddModal(false); resetNewJob(); }} style={{ flex: 1 }} />
+                <Button title="Add Job" style={{ flex: 1 }} onPress={createScheduledJob} />
               </View>
             </ScrollView>
           </View>
@@ -199,8 +382,10 @@ const styles = StyleSheet.create({
   emptySubtext: { fontSize: 13, color: COLORS.textSecondary, marginTop: 2 },
   modalOverlay: { flex: 1, backgroundColor: '#000000AA', justifyContent: 'flex-end' },
   modal: { maxHeight: '88%', backgroundColor: COLORS.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24 },
-  modalContent: { padding: SPACING.lg, paddingBottom: 40 },
-  modalTitle: { fontSize: 20, fontWeight: '800', color: COLORS.text, marginBottom: SPACING.lg },
+  modalContent: { padding: SPACING.lg, paddingBottom: 150 },
+  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: SPACING.lg },
+  modalTitle: { fontSize: 20, fontWeight: '800', color: COLORS.text },
+  modalClose: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.surfaceLight, borderWidth: 1, borderColor: COLORS.border },
   inputLabel: { fontSize: 13, fontWeight: '600', color: COLORS.textSecondary, marginBottom: 6 },
   input: { backgroundColor: COLORS.surfaceLight, borderRadius: BORDER_RADIUS.md, padding: SPACING.md, color: COLORS.text, fontSize: 15, borderWidth: 1, borderColor: COLORS.border, marginBottom: SPACING.md },
   row: { flexDirection: 'row', gap: SPACING.sm },

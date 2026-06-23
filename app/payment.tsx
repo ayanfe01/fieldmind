@@ -1,28 +1,34 @@
 import React, { useState } from 'react';
 import {
-  View, Text, StyleSheet, SafeAreaView, ScrollView,
-  TouchableOpacity, ActivityIndicator, Alert, TextInput,
+  View, Text, StyleSheet, ScrollView,
+  TouchableOpacity, ActivityIndicator, TextInput, KeyboardAvoidingView, Platform,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useStripe } from '@stripe/stripe-react-native';
 import { COLORS, SPACING, BORDER_RADIUS } from '../lib/constants';
-import { PAYMENT_TERMS, calculatePaymentSplit, formatCurrency, createPaymentIntent, TEST_CARDS } from '../lib/payments';
+import { PAYMENT_TERMS, calculatePaymentSplit, formatCurrency, createPaymentIntent } from '../lib/payments';
 import { useAppStore } from '../store/useAppStore';
 import { Button } from '../components/ui/Button';
+import { useThemedAlert } from '../components/ui/ThemedAlertProvider';
 
 type Step = 'terms' | 'summary' | 'processing' | 'success';
 
 export default function PaymentScreen() {
   const router = useRouter();
+  const themedAlert = useThemedAlert();
+  const { initPaymentSheet, presentPaymentSheet } = useStripe();
   const params = useLocalSearchParams<{ invoiceId: string; type: 'deposit' | 'final' }>();
   const { invoices, clients, updateInvoice } = useAppStore();
 
   const invoice = invoices.find(i => i.id === params.invoiceId);
   const client = clients.find(c => c.id === invoice?.clientId);
+  const initialTerms = PAYMENT_TERMS.find(terms => terms.type === invoice?.paymentTerms) || PAYMENT_TERMS[0];
 
   const [step, setStep] = useState<Step>(params.type ? 'summary' : 'terms');
-  const [selectedTerms, setSelectedTerms] = useState(PAYMENT_TERMS[0]);
-  const [customPercent, setCustomPercent] = useState('30');
+  const [selectedTerms, setSelectedTerms] = useState(initialTerms);
+  const [customPercent, setCustomPercent] = useState(String(invoice?.depositPercent || initialTerms.depositPercent || 30));
   const [processing, setProcessing] = useState(false);
 
   if (!invoice) {
@@ -36,15 +42,16 @@ export default function PaymentScreen() {
     );
   }
 
-  const split = calculatePaymentSplit(
-    invoice.total,
-    selectedTerms,
-    selectedTerms.type === 'custom' ? parseInt(customPercent) : undefined
-  );
+  const savedTerms = PAYMENT_TERMS.find(terms => terms.type === invoice.paymentTerms);
+  const activeTerms = params.type && savedTerms ? savedTerms : selectedTerms;
+  const activeCustomPercent = activeTerms.type === 'custom'
+    ? Number(invoice.depositPercent || parseInt(customPercent) || 30)
+    : undefined;
+  const split = calculatePaymentSplit(invoice.total, activeTerms, activeCustomPercent);
 
   const isDepositPayment = params.type === 'deposit';
   const isFinalPayment = params.type === 'final';
-  const paymentAmount = isDepositPayment ? split.depositAmount :
+  const paymentAmount = isDepositPayment ? (invoice.depositAmount || split.depositAmount) :
     isFinalPayment ? (invoice.finalAmount || split.finalAmount) :
     split.depositAmount;
 
@@ -56,6 +63,17 @@ export default function PaymentScreen() {
       finalAmount: split.finalAmount,
       paymentStatus: 'unpaid',
     });
+    if (selectedTerms.type === 'full_after') {
+      themedAlert.show({
+        title: 'Payment terms saved',
+        message: 'The client will pay the full balance after completion.',
+        icon: 'cash-check',
+        actions: [
+          { label: 'Done', icon: 'check', onPress: () => router.back() },
+        ],
+      });
+      return;
+    }
     setStep('summary');
   };
 
@@ -70,34 +88,77 @@ export default function PaymentScreen() {
         ? `Final payment for: ${invoice.jobDescription}`
         : `Payment for: ${invoice.jobDescription}`;
 
-      await createPaymentIntent(amountInCents, 'usd', description, {
+      if (amountInCents < 50) {
+        throw new Error('Payment amount is too low (minimum $0.50).');
+      }
+
+      const { clientSecret, paymentIntentId } = await createPaymentIntent(amountInCents, 'usd', description, {
         invoiceId: invoice.id,
+        quoteId: invoice.quoteId || '',
         clientId: invoice.clientId,
         type: params.type || 'full',
       });
 
-      // Simulate a short processing delay for UX
-      await new Promise(r => setTimeout(r, 1500));
+      const { error: initError } = await initPaymentSheet({
+        merchantDisplayName: 'FieldMind',
+        paymentIntentClientSecret: clientSecret,
+        allowsDelayedPaymentMethods: false,
+        appearance: {
+          colors: {
+            primary: '#2563EB',
+            background: '#ffffff',
+            componentBackground: '#f8fafc',
+            componentBorder: '#e2e8f0',
+            componentDivider: '#e2e8f0',
+            primaryText: '#0f172a',
+            secondaryText: '#64748b',
+            componentText: '#0f172a',
+            placeholderText: '#94a3b8',
+            icon: '#64748b',
+            error: '#ef4444',
+          },
+        },
+      });
 
-      // Update invoice status
+      if (initError) {
+        throw new Error(initError.message);
+      }
+
+      const { error: presentError } = await presentPaymentSheet();
+
+      if (presentError) {
+        if (presentError.code === 'Canceled') {
+          setStep('summary');
+          return;
+        }
+        throw new Error(presentError.message);
+      }
+
+      // Payment succeeded — update invoice status
       if (isDepositPayment) {
         updateInvoice(invoice.id, {
           depositPaidAt: new Date().toISOString(),
+          depositPaymentIntentId: paymentIntentId,
           paymentStatus: split.finalAmount > 0 ? 'deposit_paid' : 'fully_paid',
           status: split.finalAmount > 0 ? 'sent' : 'paid',
         });
       } else {
         updateInvoice(invoice.id, {
           paidAt: new Date().toISOString(),
+          finalPaymentIntentId: paymentIntentId,
           paymentStatus: 'fully_paid',
           status: 'paid',
         });
       }
-
       setStep('success');
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : 'Payment failed. Please try again.';
-      Alert.alert('Payment Failed', message);
+      themedAlert.show({
+        title: 'Payment Failed',
+        message,
+        icon: 'credit-card-off-outline',
+        actions: [{ label: 'Try Again', onPress: () => setStep('summary') }],
+      });
       setStep('summary');
     } finally {
       setProcessing(false);
@@ -119,7 +180,8 @@ export default function PaymentScreen() {
         <View style={{ width: 40 }} />
       </View>
 
-      <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
+      <KeyboardAvoidingView style={styles.keyboard} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
 
         {/* STEP 1 — Choose Terms */}
         {step === 'terms' && (
@@ -235,14 +297,6 @@ export default function PaymentScreen() {
               </View>
             </View>
 
-            {/* Test card hint */}
-            <View style={styles.testCard}>
-              <MaterialCommunityIcons name="information-outline" size={16} color={COLORS.warning} />
-              <Text style={styles.testCardText}>
-                Test mode - use card <Text style={styles.testCardNum}>4242 4242 4242 4242</Text>
-              </Text>
-            </View>
-
             <Button
               title={`Pay ${formatCurrency(paymentAmount)}`}
               onPress={handlePay}
@@ -283,8 +337,14 @@ export default function PaymentScreen() {
 
             <View style={styles.successActions}>
               <Button
-                title="Back to Invoices"
+                title="View Invoices"
                 onPress={() => router.replace('/(tabs)/invoices')}
+                style={{ flex: 1, marginBottom: SPACING.sm }}
+              />
+              <Button
+                title="Back to Messages"
+                variant="ghost"
+                onPress={() => router.replace('/(tabs)/messages')}
                 style={{ flex: 1 }}
               />
             </View>
@@ -293,12 +353,14 @@ export default function PaymentScreen() {
 
         <View style={{ height: SPACING.xxl }} />
       </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: COLORS.background },
+  keyboard: { flex: 1 },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: SPACING.lg, paddingVertical: SPACING.md,

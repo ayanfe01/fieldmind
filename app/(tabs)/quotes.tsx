@@ -1,11 +1,14 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, SafeAreaView, ScrollView, TouchableOpacity, Alert } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { format } from 'date-fns';
+import { addDays, format } from 'date-fns';
 import { useAppStore } from '../../store/useAppStore';
 import { StatusBadge } from '../../components/ui/StatusBadge';
+import { useThemedAlert } from '../../components/ui/ThemedAlertProvider';
 import { COLORS, SPACING, BORDER_RADIUS } from '../../lib/constants';
-import { QuoteStatus } from '../../lib/types';
+import { formatCurrency } from '../../lib/payments';
+import { PaymentTermsType, Quote, QuoteStatus } from '../../lib/types';
 
 const FILTERS: { label: string; value: QuoteStatus | 'all' }[] = [
   { label: 'All', value: 'all' },
@@ -16,10 +19,204 @@ const FILTERS: { label: string; value: QuoteStatus | 'all' }[] = [
 
 export default function QuotesScreen() {
   const router = useRouter();
-  const { quotes, clients, updateQuote, deleteQuote } = useAppStore();
+  const { quotes, clients, conversations, invoices, updateQuote, deleteQuote, addInvoice, addClient, startConversation, addMessage } = useAppStore();
+  const themedAlert = useThemedAlert();
   const [filter, setFilter] = useState<QuoteStatus | 'all'>('all');
   const filtered = filter === 'all' ? quotes : quotes.filter(q => q.status === filter);
   const getClient = (id: string) => clients.find(c => c.id === id);
+  const isUuid = (value?: string) => !!value && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+
+  const getDepositPercent = (paymentTerms?: PaymentTermsType, depositPercent?: number) => {
+    if (paymentTerms === 'custom') return depositPercent ?? 30;
+    if (paymentTerms === 'split_50_50') return 50;
+    if (paymentTerms === 'full_upfront') return 100;
+    if (paymentTerms === 'full_after') return 0;
+    return undefined;
+  };
+
+  const resolveClientForQuote = (quote: Quote) => {
+    const existing = getClient(quote.clientId);
+    if (existing) return existing;
+    const linkedConv = conversations.find(c =>
+      c.participantId === quote.clientId ||
+      c.participantUserIds?.includes(quote.clientId)
+    );
+    if (linkedConv) {
+      const fallback = { id: quote.clientId, name: linkedConv.participantName, phone: '', address: '', createdAt: new Date().toISOString() };
+      addClient(fallback);
+      return fallback;
+    }
+    return null;
+  };
+
+  // Find the best existing conversation for a client — checks participantId, participantUserIds, and name
+  const findConversationForClient = (clientId: string, clientName: string) =>
+    conversations.find(c =>
+      c.participantId === clientId ||
+      c.participantUserIds?.includes(clientId) ||
+      c.participantName?.toLowerCase() === clientName.toLowerCase()
+    );
+
+  const buildInvoiceFromQuote = (quote: Quote): string | null => {
+    const existing = invoices.find(inv => inv.quoteId === quote.id);
+    if (existing) return existing.id;
+    if (!quote.total || quote.total <= 0) return null;
+    const depositPercent = getDepositPercent(quote.paymentTerms, quote.depositPercent);
+    const depositAmount = depositPercent == null ? undefined : Math.round((quote.total * depositPercent) / 100 * 100) / 100;
+    const finalAmount = depositAmount == null ? undefined : Math.round((quote.total - depositAmount) * 100) / 100;
+    const invoiceId = `invoice-${Date.now()}`;
+    addInvoice({
+      id: invoiceId,
+      quoteId: quote.id,
+      clientId: quote.clientId,
+      jobDescription: quote.jobDescription,
+      lineItems: quote.lineItems,
+      subtotal: quote.subtotal,
+      tax: quote.tax,
+      total: quote.total,
+      status: 'sent',
+      dueDate: addDays(new Date(), 7).toISOString(),
+      notes: quote.notes,
+      createdAt: new Date().toISOString(),
+      paymentTerms: quote.paymentTerms,
+      depositPercent,
+      depositAmount,
+      finalAmount,
+      paymentStatus: 'unpaid',
+    });
+    return invoiceId;
+  };
+
+  const acceptQuote = (quote: Quote) => {
+    if (!quote.total || quote.total <= 0) {
+      themedAlert.show({
+        title: 'Quote has no total',
+        message: 'Add line items to this quote before accepting.',
+        icon: 'receipt-text-remove-outline',
+      });
+      return;
+    }
+    updateQuote(quote.id, { status: 'accepted' });
+    buildInvoiceFromQuote(quote);
+    themedAlert.show({
+      title: 'Quote accepted',
+      message: 'An invoice has been created. Send it to the customer via chat to request payment.',
+      icon: 'receipt-text-check-outline',
+      actions: [
+        { label: 'Send Invoice to Chat', icon: 'message-text-outline', onPress: () => void sendInvoiceToChat(quote) },
+        { label: 'Close', variant: 'ghost' },
+      ],
+    });
+  };
+
+  const sendInvoiceToChat = async (quote: Quote) => {
+    const client = resolveClientForQuote(quote);
+    if (!client) {
+      themedAlert.show({
+        title: 'No customer linked',
+        message: 'Could not find the customer for this quote. Go to Messages to find the conversation.',
+        icon: 'account-alert-outline',
+        actions: [
+          { label: 'Go to Messages', icon: 'message-outline', onPress: () => router.push('/(tabs)/messages') },
+          { label: 'Cancel', variant: 'ghost' },
+        ],
+      });
+      return;
+    }
+    const invoiceId = buildInvoiceFromQuote(quote);
+    if (!invoiceId) {
+      themedAlert.show({
+        title: 'Quote has no total',
+        message: 'This quote has no line items or a $0 total. Edit the quote before sending an invoice.',
+        icon: 'receipt-text-remove-outline',
+      });
+      return;
+    }
+    const amount = quote.total;
+    // Use direct conversation lookup first — avoids creating duplicates when client.id
+    // doesn't exactly match the conversation's participantId (e.g. manually created clients)
+    const existingConv = findConversationForClient(client.id, client.name);
+    const conversationId = existingConv?.id || startConversation({
+      participantId: client.id,
+      participantUserId: isUuid(client.id) ? client.id : undefined,
+      participantName: client.name,
+      participantRole: 'customer',
+      subject: `Invoice: ${quote.jobDescription}`,
+      quoteRequested: false,
+    });
+    if (!conversationId) return;
+    try {
+      await addMessage(
+        conversationId,
+        `Hi ${client.name}, here is the invoice for "${quote.jobDescription}". Please review and pay when ready.`,
+        undefined,
+        {
+          actionType: 'invoice_payment',
+          actionLabel: `Pay ${formatCurrency(amount)}`,
+          actionPayload: { invoiceId, amount, type: 'deposit' },
+        }
+      );
+      router.push({ pathname: '/chat/[conversationId]', params: { conversationId } });
+    } catch {
+      themedAlert.show({
+        title: 'Could not send invoice',
+        message: 'The invoice was created but the chat message failed. Try sending from the Messages tab.',
+        icon: 'message-alert-outline',
+      });
+    }
+  };
+
+  const sendQuote = async (quote: Quote) => {
+    const client = resolveClientForQuote(quote);
+    if (!client) {
+      themedAlert.show({
+        title: 'No customer linked',
+        message: 'This quote has no customer attached. Go to Jobs or Messages to find the customer, then send the quote from the chat.',
+        icon: 'account-alert-outline',
+        actions: [
+          { label: 'Go to Jobs', icon: 'briefcase-outline', onPress: () => router.push('/(tabs)/jobs') },
+          { label: 'Go to Messages', icon: 'message-outline', onPress: () => router.push('/(tabs)/messages') },
+          { label: 'Cancel', variant: 'ghost' },
+        ],
+      });
+      return;
+    }
+    updateQuote(quote.id, { status: 'sent' });
+    const existingConv = findConversationForClient(client.id, client.name);
+    const conversationId = existingConv?.id || startConversation({
+      participantId: client.id,
+      participantUserId: isUuid(client.id) ? client.id : undefined,
+      participantName: client.name,
+      participantRole: 'customer',
+      subject: `Quote: ${quote.jobDescription}`,
+      quoteRequested: true,
+    });
+    if (!conversationId) return;
+    try {
+      await addMessage(
+        conversationId,
+        `Hi ${client.name}, I sent a quote for "${quote.jobDescription}". Please review it and let me know if you want any changes.`,
+        undefined,
+        {
+          actionType: 'quote_review',
+          actionLabel: 'Sent',
+          actionPayload: {
+            quoteId: quote.id,
+            amount: quote.total,
+            depositPercent: quote.depositPercent,
+            depositAmount: quote.depositPercent ? Math.round(quote.total * quote.depositPercent / 100 * 100) / 100 : undefined,
+          },
+        }
+      );
+      router.push({ pathname: '/chat/[conversationId]', params: { conversationId } });
+    } catch (error) {
+      themedAlert.show({
+        title: 'Quote message failed',
+        message: error instanceof Error ? error.message : 'The quote was updated, but the chat message could not be sent.',
+        icon: 'message-alert-outline',
+      });
+    }
+  };
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -56,30 +253,47 @@ export default function QuotesScreen() {
                     <Text style={styles.date}>Created {format(new Date(quote.createdAt), 'MMM d, yyyy')}</Text>
                   </View>
                   <View style={styles.cardRight}>
-                    <Text style={styles.amount}>${quote.total.toFixed(2)}</Text>
+                    <Text style={styles.amount}>{formatCurrency(quote.total)}</Text>
                     <StatusBadge status={quote.status} />
                   </View>
                 </View>
                 <View style={styles.cardActions}>
                   {quote.status === 'draft' && (
-                    <TouchableOpacity style={styles.actionChip} onPress={() => updateQuote(quote.id, { status: 'sent' })}>
-                      <Text style={styles.actionChipText}>Mark Sent</Text>
+                    <TouchableOpacity style={styles.actionChip} onPress={() => sendQuote(quote)}>
+                      <Text style={styles.actionChipText}>Send to Customer</Text>
                     </TouchableOpacity>
                   )}
                   {quote.status === 'sent' && (
                     <>
-                      <TouchableOpacity style={[styles.actionChip, styles.actionGreen]} onPress={() => updateQuote(quote.id, { status: 'accepted' })}>
-                        <Text style={[styles.actionChipText, { color: COLORS.success }]}>Accept</Text>
+                      <TouchableOpacity style={[styles.actionChip, styles.actionGreen]} onPress={() => acceptQuote(quote)}>
+                        <Text style={[styles.actionChipText, { color: COLORS.success }]}>Customer Accepted</Text>
                       </TouchableOpacity>
                       <TouchableOpacity style={[styles.actionChip, styles.actionRed]} onPress={() => updateQuote(quote.id, { status: 'declined' })}>
-                        <Text style={[styles.actionChipText, { color: COLORS.error }]}>Decline</Text>
+                        <Text style={[styles.actionChipText, { color: COLORS.error }]}>Mark Declined</Text>
                       </TouchableOpacity>
                     </>
                   )}
-                  <TouchableOpacity style={styles.actionChip} onPress={() => Alert.alert('Delete', 'Delete this quote?', [
-                    { text: 'Cancel', style: 'cancel' },
-                    { text: 'Delete', style: 'destructive', onPress: () => deleteQuote(quote.id) },
-                  ])}>
+                  {quote.status === 'accepted' && (() => {
+                    const linkedInvoice = invoices.find(inv => inv.quoteId === quote.id);
+                    return linkedInvoice ? (
+                      <TouchableOpacity style={[styles.actionChip, styles.actionGreen]} onPress={() => void sendInvoiceToChat(quote)}>
+                        <Text style={[styles.actionChipText, { color: COLORS.success }]}>Send Invoice to Chat</Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <TouchableOpacity style={[styles.actionChip, styles.actionGreen]} onPress={() => void sendInvoiceToChat(quote)}>
+                        <Text style={[styles.actionChipText, { color: COLORS.success }]}>Generate &amp; Send Invoice</Text>
+                      </TouchableOpacity>
+                    );
+                  })()}
+                  <TouchableOpacity style={styles.actionChip} onPress={() => themedAlert.show({
+                    title: 'Delete quote?',
+                    message: 'This quote will be removed from your list.',
+                    icon: 'file-document-remove-outline',
+                    actions: [
+                      { label: 'Delete', variant: 'danger', icon: 'trash-can-outline', onPress: () => deleteQuote(quote.id) },
+                      { label: 'Cancel', variant: 'ghost' },
+                    ],
+                  })}>
                     <Text style={styles.actionChipText}>Delete</Text>
                   </TouchableOpacity>
                 </View>
