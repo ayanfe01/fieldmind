@@ -26,7 +26,12 @@ export default function ScheduleScreen() {
   const selectedDateStr = selectedDate.toISOString().split('T')[0];
   // Show own jobs AND jobs where this user is the assigned pro
   const ownJobs = jobs.filter(job => !job.ownerId || job.ownerId === user?.id || job.assignedProId === user?.id);
-  const dayJobs = ownJobs.filter(j => j.scheduledDate === selectedDateStr && j.status !== 'cancelled');
+  // Active schedule: exclude cancelled and jobs that are done + invoice already sent
+  const dayJobs = ownJobs.filter(j =>
+    j.scheduledDate === selectedDateStr &&
+    j.status !== 'cancelled' &&
+    !(j.status === 'completed' && j.invoiceSentAt)
+  );
   const getClient = (id: string) => clients.find(c => c.id === id);
 
   const getStatusColor = (status: JobStatus) => {
@@ -149,6 +154,8 @@ export default function ScheduleScreen() {
           actionPayload: { invoiceId, amount, type: 'deposit' },
         }
       );
+      // Stamp invoiceSentAt so this job moves out of the active schedule
+      updateJob(jobId, { invoiceSentAt: new Date().toISOString() });
       router.push({ pathname: '/chat/[conversationId]', params: { conversationId } });
     } catch {
       themedAlert.show({
@@ -205,9 +212,15 @@ export default function ScheduleScreen() {
     <SafeAreaView style={styles.safe}>
       <View style={styles.header}>
         <Text style={styles.title}>Schedule</Text>
-        <TouchableOpacity style={styles.newBtn} onPress={() => setShowAddModal(true)}>
-          <Text style={styles.newBtnText}>+ Job</Text>
-        </TouchableOpacity>
+        <View style={styles.headerActions}>
+          <TouchableOpacity style={styles.historyBtn} onPress={() => router.push('/job-history')}>
+            <MaterialCommunityIcons name="history" size={18} color={COLORS.textSecondary} />
+            <Text style={styles.historyBtnText}>History</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.newBtn} onPress={() => setShowAddModal(true)}>
+            <Text style={styles.newBtnText}>+ Job</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.weekScroll} contentContainerStyle={styles.weekStrip}>
@@ -240,6 +253,8 @@ export default function ScheduleScreen() {
             </View>
           ) : dayJobs.sort((a, b) => a.scheduledTime.localeCompare(b.scheduledTime)).map(job => {
             const client = getClient(job.clientId);
+            const linkedConv = conversations.find(c => c.jobId === job.id || (job.ownerId && c.participantUserIds?.includes(job.ownerId)));
+            const displayName = client?.name || linkedConv?.participantName || 'Customer';
             return (
               <TouchableOpacity key={job.id} style={styles.jobCard} onPress={() => router.push({ pathname: '/job-detail', params: { jobId: job.id } })} activeOpacity={0.85}>
                 <View style={[styles.timeBar, { backgroundColor: getStatusColor(job.status) }]} />
@@ -248,7 +263,7 @@ export default function ScheduleScreen() {
                     <View style={{ flex: 1 }}>
                       <Text style={styles.jobTime}>{job.scheduledTime}</Text>
                       <Text style={styles.jobTitle}>{job.title}</Text>
-                      <Text style={styles.clientName}>{client?.name}</Text>
+                      <Text style={styles.clientName}>{displayName}</Text>
                       <Text style={styles.jobAddress}>{job.address}</Text>
                     </View>
                     <View style={styles.jobMeta}>
@@ -267,31 +282,54 @@ export default function ScheduleScreen() {
                         style={[styles.actionChip, styles.actionGreen]}
                         onPress={(event) => {
                           event.stopPropagation();
-                          updateJob(job.id, { status: 'completed' });
-                          // Prompt to send invoice if this was a customer booking
-                          if (job.assignedProId === user?.id) {
-                            themedAlert.show({
-                              title: 'Job completed!',
-                              message: 'Send the customer an invoice to request payment.',
-                              icon: 'check-circle-outline',
-                              actions: [
-                                { label: 'Send Invoice', icon: 'receipt-text-send-outline', onPress: () => void sendInvoiceFromJob(job.id) },
-                                { label: 'Later', variant: 'ghost' },
-                              ],
-                            });
-                          }
+                          updateJob(job.id, { status: 'completed', completedAt: new Date().toISOString() });
+                          themedAlert.show({
+                            title: 'Job completed!',
+                            message: 'Send the customer an invoice to request payment.',
+                            icon: 'check-circle-outline',
+                            actions: [
+                              { label: 'Send Invoice', icon: 'receipt-text-send-outline', onPress: () => void sendInvoiceFromJob(job.id) },
+                              { label: 'Later', variant: 'ghost' },
+                            ],
+                          });
                         }}
                       >
                         <Text style={[styles.actionText, { color: COLORS.success }]}>Complete</Text>
                       </TouchableOpacity>
                     )}
-                    {job.status === 'completed' && job.assignedProId === user?.id && (
+                    {job.status === 'completed' && !job.invoiceSentAt && (
                       <TouchableOpacity style={[styles.actionChip, styles.actionGreen]} onPress={(event) => { event.stopPropagation(); void sendInvoiceFromJob(job.id); }}>
+                        <MaterialCommunityIcons name="receipt-text-send-outline" size={13} color={COLORS.success} />
                         <Text style={[styles.actionText, { color: COLORS.success }]}>Send Invoice</Text>
                       </TouchableOpacity>
                     )}
                     <TouchableOpacity style={styles.actionChip} onPress={(event) => { event.stopPropagation(); callClient(client?.phone); }}><Text style={styles.actionText}>Call</Text></TouchableOpacity>
                     <TouchableOpacity style={styles.actionChip} onPress={(event) => { event.stopPropagation(); navigateTo(job.address); }}><Text style={styles.actionText}>Navigate</Text></TouchableOpacity>
+                    {job.status !== 'completed' && (
+                      <TouchableOpacity
+                        style={[styles.actionChip, styles.actionDanger]}
+                        onPress={(event) => {
+                          event.stopPropagation();
+                          themedAlert.show({
+                            title: 'Cancel this job?',
+                            message: `"${job.title}" will be moved out of your schedule. This cannot be undone.`,
+                            icon: 'calendar-remove-outline',
+                            actions: [
+                              {
+                                label: 'Cancel Job',
+                                variant: 'danger',
+                                icon: 'close-circle-outline',
+                                onPress: () => updateJob(job.id, { status: 'cancelled' }),
+                              },
+                              { label: 'Keep', variant: 'ghost' },
+                            ],
+                          });
+                        }}
+                      >
+                        <MaterialCommunityIcons name="close-circle-outline" size={13} color={COLORS.error} />
+                        <Text style={[styles.actionText, { color: COLORS.error }]}>Cancel</Text>
+                      </TouchableOpacity>
+                    )}
                   </View>
                 </View>
               </TouchableOpacity>
@@ -346,6 +384,9 @@ const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: COLORS.background },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: SPACING.lg, paddingTop: SPACING.screenTop, paddingBottom: SPACING.md },
   title: { fontSize: 28, fontWeight: '800', color: COLORS.text },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm },
+  historyBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, paddingVertical: 8, borderRadius: BORDER_RADIUS.full, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.surface },
+  historyBtnText: { fontSize: 13, fontWeight: '700', color: COLORS.textSecondary },
   newBtn: { backgroundColor: COLORS.primary, paddingHorizontal: 16, paddingVertical: 8, borderRadius: BORDER_RADIUS.full },
   newBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
   weekScroll: { maxHeight: 80 },
@@ -376,6 +417,7 @@ const styles = StyleSheet.create({
   jobActions: { flexDirection: 'row', gap: 8, marginTop: SPACING.sm, paddingTop: SPACING.sm, borderTopWidth: 1, borderTopColor: COLORS.border, flexWrap: 'wrap' },
   actionChip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: BORDER_RADIUS.full, backgroundColor: COLORS.surfaceLight, borderWidth: 1, borderColor: COLORS.border },
   actionGreen: { borderColor: COLORS.success + '44', backgroundColor: COLORS.success + '11' },
+  actionDanger: { borderColor: COLORS.error + '44', backgroundColor: COLORS.error + '11' },
   actionText: { fontSize: 12, fontWeight: '600', color: COLORS.textSecondary },
   empty: { alignItems: 'center', paddingVertical: 60, gap: SPACING.sm },
   emptyText: { fontSize: 18, fontWeight: '700', color: COLORS.text },

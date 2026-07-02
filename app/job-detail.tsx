@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import {
-  View, Text, StyleSheet, SafeAreaView, ScrollView,
-  TouchableOpacity, Alert, Modal, TextInput,
+  View, Text, StyleSheet, ScrollView,
+  TouchableOpacity, Modal, TextInput, KeyboardAvoidingView, Platform,
   Linking,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { COLORS, SPACING, BORDER_RADIUS } from '../lib/constants';
@@ -11,14 +12,17 @@ import { useAppStore } from '../store/useAppStore';
 import { MediaUploader } from '../components/ui/MediaUploader';
 import { StatusBadge } from '../components/ui/StatusBadge';
 import { Button } from '../components/ui/Button';
+import { useThemedAlert } from '../components/ui/ThemedAlertProvider';
 import { MediaItem } from '../lib/types';
 import { formatCurrency } from '../lib/payments';
+import { openDirections } from '../lib/maps';
 import { format } from 'date-fns';
 
 export default function JobDetailScreen() {
   const router = useRouter();
   const { jobId } = useLocalSearchParams<{ jobId: string }>();
-  const { jobs, clients, invoices, updateJob, updateInvoice, user } = useAppStore();
+  const { jobs, clients, invoices, updateJob, updateInvoice, user, startConversation } = useAppStore();
+  const themedAlert = useThemedAlert();
 
   const job = jobs.find(j => j.id === jobId);
   const client = clients.find(c => c.id === job?.clientId);
@@ -40,6 +44,7 @@ export default function JobDetailScreen() {
   }
 
   const isTrade = user?.role === 'tradesperson';
+  const isCustomer = user?.role === 'customer';
   const canVerify = !isTrade && job.status === 'completed' && job.escrowStatus === 'holding';
   const customerMedia = job.customerMedia || [];
   const completionMedia = job.completionMedia || [];
@@ -59,13 +64,14 @@ export default function JobDetailScreen() {
 
   // Customer verifies job is done and releases escrow.
   const handleVerifyJob = async () => {
-    Alert.alert(
-      'Confirm Job Complete',
-      'By confirming, you verify the work is done to your satisfaction. Payment will be released to the service pro.',
-      [
-        { text: 'Not Yet', style: 'cancel' },
+    themedAlert.show({
+      title: 'Confirm Job Complete',
+      message: 'By confirming, you verify the work is done to your satisfaction. Payment will be released to the service pro.',
+      icon: 'shield-check-outline',
+      actions: [
         {
-          text: 'Confirm & Release Payment',
+          label: 'Confirm & Release Payment',
+          icon: 'cash-check',
           onPress: async () => {
             setVerifying(true);
             await new Promise(r => setTimeout(r, 1200));
@@ -81,11 +87,16 @@ export default function JobDetailScreen() {
               });
             }
             setVerifying(false);
-            Alert.alert('Payment Released!', 'The service pro has been paid. Thank you.');
+            themedAlert.show({
+              title: 'Payment Released',
+              message: 'The service pro has been paid. Thank you.',
+              icon: 'check-circle-outline',
+            });
           },
         },
-      ]
-    );
+        { label: 'Not Yet', variant: 'ghost' },
+      ],
+    });
   };
 
   // Mark as cash payment
@@ -104,37 +115,96 @@ export default function JobDetailScreen() {
       });
     }
     setShowCashModal(false);
-    Alert.alert('Cash Payment Recorded', 'This job has been marked as paid in cash.');
+    themedAlert.show({
+      title: 'Cash Payment Recorded',
+      message: 'This job has been marked as paid in cash.',
+      icon: 'cash-check',
+    });
   };
 
   // Service pro marks job complete and puts payment in escrow.
   const handleMarkComplete = () => {
-    Alert.alert('Mark Job Complete', 'This will notify the customer to verify and release payment.', [
-      { text: 'Cancel', style: 'cancel' },
+    themedAlert.show({
+      title: 'Mark Job Complete',
+      message: 'This will notify the customer to verify and release payment.',
+      icon: 'briefcase-check-outline',
+      actions: [
       {
-        text: 'Mark Complete',
+        label: 'Mark Complete',
+        icon: 'check-circle-outline',
         onPress: () => updateJob(job.id, {
           status: 'completed',
           escrowStatus: 'holding',
         }),
       },
-    ]);
+      { label: 'Cancel', variant: 'ghost' },
+      ],
+    });
   };
 
   const callClient = () => {
     if (!client?.phone) {
-      Alert.alert('No phone number', 'Add a phone number for this client before calling.');
+      themedAlert.show({
+        title: 'No phone number',
+        message: 'Add a phone number for this client before calling.',
+        icon: 'phone-alert-outline',
+      });
       return;
     }
     Linking.openURL(`tel:${client.phone}`).catch(() => {
-      Alert.alert('Call unavailable', 'Your device could not start a phone call.');
+      themedAlert.show({
+        title: 'Call unavailable',
+        message: 'Your device could not start a phone call.',
+        icon: 'phone-off-outline',
+      });
     });
   };
 
   const navigateToJob = () => {
-    const url = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(job.address)}`;
-    Linking.openURL(url).catch(() => {
-      Alert.alert('Maps unavailable', 'Your device could not open maps for this job.');
+    openDirections(job.address).catch(() => {
+      themedAlert.show({
+        title: 'Maps unavailable',
+        message: 'Your device could not open maps for this job.',
+        icon: 'map-marker-off-outline',
+      });
+    });
+  };
+
+  const openJobChat = () => {
+    const participantId = isTrade ? client?.id : (job.assignedProId || client?.id);
+    const participantName = isTrade ? (client?.name || 'Customer') : (job.assignedProName || client?.name || 'Service Pro');
+    if (!participantId) {
+      themedAlert.show({
+        title: 'No conversation yet',
+        message: 'A service pro has not been attached to this request yet.',
+        icon: 'message-alert-outline',
+      });
+      return;
+    }
+    const conversationId = startConversation({
+      participantId,
+      participantName,
+      participantRole: isTrade ? 'customer' : 'tradesperson',
+      subject: job.title,
+    });
+    router.push({
+      pathname: '/chat/[conversationId]',
+      params: {
+        conversationId,
+        draft: isTrade ? `Hi ${participantName}, I have an update about "${job.title}".` : `Hi, I have a question about "${job.title}".`,
+      },
+    });
+  };
+
+  const cancelCustomerRequest = () => {
+    themedAlert.show({
+      title: 'Cancel request?',
+      message: 'This will close the request so pros no longer treat it as active.',
+      icon: 'file-cancel-outline',
+      actions: [
+        { label: 'Cancel Request', variant: 'danger', icon: 'close-circle-outline', onPress: () => updateJob(job.id, { status: 'cancelled' }) },
+        { label: 'Keep Request', variant: 'ghost' },
+      ],
     });
   };
 
@@ -287,6 +357,26 @@ export default function JobDetailScreen() {
               <Button title="Mark Job Complete" onPress={handleMarkComplete} style={styles.actionBtn} />
             )}
 
+            {isCustomer && invoice && (
+              <TouchableOpacity style={styles.outlineBtn} onPress={() => router.push({ pathname: '/invoice-view', params: { invoiceId: invoice.id } })} activeOpacity={0.8}>
+                <MaterialCommunityIcons name="receipt-text-outline" size={18} color={COLORS.primary} />
+                <Text style={styles.outlineBtnText}>View Invoice</Text>
+              </TouchableOpacity>
+            )}
+            {isCustomer && invoice && invoice.status !== 'paid' && invoice.paymentStatus !== 'fully_paid' && (
+              <Button
+                title={invoice.paymentStatus === 'deposit_paid' ? `Pay Final Balance ${formatCurrency(invoice.finalAmount || 0)}` : `Pay Invoice ${formatCurrency(invoice.depositAmount || invoice.total)}`}
+                onPress={() => router.push({
+                  pathname: '/payment',
+                  params: {
+                    invoiceId: invoice.id,
+                    type: invoice.paymentStatus === 'deposit_paid' ? 'final' : 'deposit',
+                  },
+                })}
+                style={styles.actionBtn}
+              />
+            )}
+
             {/* Customer — verify job done */}
             {canVerify && (
               <Button
@@ -298,7 +388,7 @@ export default function JobDetailScreen() {
             )}
 
             {/* Cash payment option */}
-            {!job.paymentMethod && job.status !== 'cancelled' && (
+            {isTrade && !job.paymentMethod && job.status !== 'cancelled' && (
               <TouchableOpacity style={styles.cashBtn} onPress={() => setShowCashModal(true)} activeOpacity={0.8}>
                 <MaterialCommunityIcons name="cash" size={20} color={COLORS.success} />
                 <Text style={styles.cashBtnText}>Record Cash Payment</Text>
@@ -306,16 +396,43 @@ export default function JobDetailScreen() {
             )}
 
             {/* Navigate */}
-            <TouchableOpacity style={styles.outlineBtn} onPress={navigateToJob} activeOpacity={0.8}>
+            {isTrade && <TouchableOpacity style={styles.outlineBtn} onPress={navigateToJob} activeOpacity={0.8}>
               <MaterialCommunityIcons name="map-marker-radius-outline" size={18} color={COLORS.primary} />
               <Text style={styles.outlineBtnText}>Navigate to Job</Text>
-            </TouchableOpacity>
+            </TouchableOpacity>}
 
             {/* Call client */}
-            <TouchableOpacity style={styles.outlineBtn} onPress={callClient} activeOpacity={0.8}>
+            {isTrade && <TouchableOpacity style={styles.outlineBtn} onPress={callClient} activeOpacity={0.8}>
               <MaterialCommunityIcons name="phone-outline" size={18} color={COLORS.primary} />
               <Text style={styles.outlineBtnText}>Call {client?.name}</Text>
-            </TouchableOpacity>
+            </TouchableOpacity>}
+
+            {isTrade && (
+              <TouchableOpacity style={styles.outlineBtn} onPress={openJobChat} activeOpacity={0.8}>
+                <MaterialCommunityIcons name="message-text-outline" size={18} color={COLORS.primary} />
+                <Text style={styles.outlineBtnText}>Message Customer</Text>
+              </TouchableOpacity>
+            )}
+
+            {isCustomer && job.assignedProId && (
+              <TouchableOpacity style={styles.outlineBtn} onPress={() => openJobChat()} activeOpacity={0.8}>
+                <MaterialCommunityIcons name="message-text-outline" size={18} color={COLORS.primary} />
+                <Text style={styles.outlineBtnText}>Message {job.assignedProName || 'Pro'}</Text>
+              </TouchableOpacity>
+            )}
+            {isCustomer && !invoice && (
+              <TouchableOpacity style={styles.outlineBtn} onPress={() => router.push({ pathname: '/find-pro', params: { category: job.customCategory || job.category } })} activeOpacity={0.8}>
+                <MaterialCommunityIcons name="account-search-outline" size={18} color={COLORS.primary} />
+                <Text style={styles.outlineBtnText}>Find Pros for This Request</Text>
+              </TouchableOpacity>
+            )}
+
+            {isCustomer && job.status !== 'cancelled' && job.status !== 'completed' && (
+              <TouchableOpacity style={[styles.outlineBtn, styles.dangerOutline]} onPress={cancelCustomerRequest} activeOpacity={0.8}>
+                <MaterialCommunityIcons name="close-circle-outline" size={18} color={COLORS.error} />
+                <Text style={[styles.outlineBtnText, { color: COLORS.error }]}>Cancel Request</Text>
+              </TouchableOpacity>
+            )}
           </View>
         </View>
 
@@ -324,9 +441,16 @@ export default function JobDetailScreen() {
 
       {/* Cash Payment Modal */}
       <Modal visible={showCashModal} animationType="slide" transparent>
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => setShowCashModal(false)} />
           <View style={styles.modal}>
-            <Text style={styles.modalTitle}>Record Cash Payment</Text>
+            <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Record Cash Payment</Text>
+              <TouchableOpacity style={styles.modalClose} onPress={() => setShowCashModal(false)}>
+                <MaterialCommunityIcons name="close" size={20} color={COLORS.textSecondary} />
+              </TouchableOpacity>
+            </View>
             <Text style={styles.modalSub}>
               Mark this job as paid in cash. This will not go through Stripe; it only records the payment in FieldMind.
             </Text>
@@ -347,8 +471,9 @@ export default function JobDetailScreen() {
               <Button title="Cancel" variant="secondary" onPress={() => setShowCashModal(false)} style={{ flex: 1 }} />
               <Button title="Record Payment" onPress={handleCashPayment} style={{ flex: 1 }} />
             </View>
+            </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </SafeAreaView>
   );
@@ -382,11 +507,15 @@ const styles = StyleSheet.create({
   cashBtnText: { fontSize: 15, fontWeight: '700', color: COLORS.success },
   outlineBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: SPACING.sm, backgroundColor: COLORS.surface, borderRadius: BORDER_RADIUS.md, padding: 14, borderWidth: 1, borderColor: COLORS.border },
   outlineBtnText: { fontSize: 15, fontWeight: '700', color: COLORS.primary },
+  dangerOutline: { borderColor: COLORS.error + '44', backgroundColor: COLORS.error + '08' },
   emptyMedia: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm, backgroundColor: COLORS.surface, borderRadius: BORDER_RADIUS.md, padding: SPACING.md, borderWidth: 1, borderColor: COLORS.border },
   emptyMediaText: { fontSize: 13, color: COLORS.textMuted },
   modalOverlay: { flex: 1, backgroundColor: '#000000BB', justifyContent: 'flex-end' },
-  modal: { backgroundColor: COLORS.surface, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: SPACING.lg, paddingBottom: 40 },
-  modalTitle: { fontSize: 20, fontWeight: '800', color: COLORS.text, marginBottom: 6 },
+  modal: { maxHeight: '88%', backgroundColor: COLORS.surface, borderTopLeftRadius: 28, borderTopRightRadius: 28 },
+  modalContent: { padding: SPACING.lg, paddingBottom: 150 },
+  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 },
+  modalTitle: { fontSize: 20, fontWeight: '800', color: COLORS.text },
+  modalClose: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.surfaceLight, borderWidth: 1, borderColor: COLORS.border },
   modalSub: { fontSize: 13, color: COLORS.textSecondary, lineHeight: 20, marginBottom: SPACING.md },
   cashAmountBox: { backgroundColor: COLORS.surfaceLight, borderRadius: BORDER_RADIUS.md, padding: SPACING.md, alignItems: 'center', marginBottom: SPACING.md, borderWidth: 1, borderColor: COLORS.border },
   cashAmountLabel: { fontSize: 12, color: COLORS.textSecondary, marginBottom: 4 },

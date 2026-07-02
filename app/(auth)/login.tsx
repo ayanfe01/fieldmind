@@ -1,36 +1,56 @@
 import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
-  ScrollView, ActivityIndicator, Alert,
+  ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { COLORS, SPACING, BORDER_RADIUS } from '../../lib/constants';
+import { getEmailValidationMessage, normalizeEmail } from '../../lib/emailValidation';
 import { defaultRouteForRole } from '../../lib/routes';
 import { useAppStore } from '../../store/useAppStore';
 import { Button } from '../../components/ui/Button';
+import { useThemedAlert } from '../../components/ui/ThemedAlertProvider';
 
 const ADMIN_EMAIL = 'admin@fieldmind.app';
 
 export default function LoginScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ next?: string }>();
+  const params = useLocalSearchParams<{ next?: string; email?: string }>();
   const nextRoute = typeof params.next === 'string' ? params.next : undefined;
+  const initialEmail = typeof params.email === 'string' ? params.email : '';
   const login = useAppStore(s => s.login);
   const signInWithGoogle = useAppStore(s => s.signInWithGoogle);
-  const [email, setEmail] = useState('');
+  const requestPasswordReset = useAppStore(s => s.requestPasswordReset);
+  const themedAlert = useThemedAlert();
+  const [email, setEmail] = useState(initialEmail);
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
+  const [resetLoading, setResetLoading] = useState(false);
 
   const handleLogin = async (overrideEmail?: string, overridePassword?: string) => {
-    const nextEmail = overrideEmail || email;
+    const nextEmail = normalizeEmail(overrideEmail || email);
     const nextPassword = overridePassword || password;
 
     if (!nextEmail || !nextPassword) {
-      Alert.alert('Missing fields', 'Please enter your email and password.');
+      themedAlert.show({
+        title: 'Missing fields',
+        message: 'Please enter your email and password.',
+        icon: 'form-textbox-password',
+      });
+      return;
+    }
+
+    const emailIssue = getEmailValidationMessage(nextEmail);
+    if (emailIssue) {
+      themedAlert.show({
+        title: 'Check email address',
+        message: emailIssue,
+        icon: 'email-alert-outline',
+      });
       return;
     }
 
@@ -39,11 +59,41 @@ export default function LoginScreen() {
     setLoading(false);
 
     if (!result.success || !result.user) {
-      Alert.alert('Login failed', result.message || 'Email or password is incorrect.');
+      themedAlert.show({
+        title: 'Login failed',
+        message: result.message || 'Email or password is incorrect.',
+        icon: 'alert-circle-outline',
+      });
       return;
     }
 
     router.replace((nextRoute || defaultRouteForRole(result.user.role)) as any);
+  };
+
+  const openSignupChooser = () => {
+    themedAlert.show({
+      title: 'Create account',
+      message: 'Choose how you want to start. You can add the other mode later from your profile.',
+      icon: 'account-plus-outline',
+      actions: [
+      {
+        label: 'Hire a Pro',
+        icon: 'home-search-outline',
+        onPress: () => router.push({ pathname: '/(auth)/signup', params: { role: 'customer' } }),
+      },
+      {
+        label: 'Offer Services',
+        icon: 'briefcase-outline',
+        onPress: () => router.push({ pathname: '/(auth)/signup', params: { role: 'tradesperson' } }),
+      },
+      {
+        label: 'Freelancer',
+        icon: 'account-switch-outline',
+        onPress: () => router.push({ pathname: '/(auth)/signup', params: { role: 'freelancer' } }),
+      },
+      { label: 'Cancel', variant: 'ghost' },
+      ],
+    });
   };
 
   const useAdminLogin = () => {
@@ -56,15 +106,61 @@ export default function LoginScreen() {
     setGoogleLoading(false);
 
     if (!result.success || !result.user) {
-      Alert.alert('Google login failed', result.message || 'Unable to log in with Google.');
+      themedAlert.show({
+        title: 'Google login failed',
+        message: result.message || 'Unable to log in with Google.',
+        icon: 'google',
+      });
       return;
     }
 
     router.replace((nextRoute || defaultRouteForRole(result.user.role)) as any);
   };
 
+  const handleForgotPassword = async () => {
+    const targetEmail = normalizeEmail(email);
+    if (!targetEmail) {
+      themedAlert.show({
+        title: 'Email required',
+        message: 'Enter your email address first, then tap forgot password.',
+        icon: 'email-alert-outline',
+      });
+      return;
+    }
+
+    const emailIssue = getEmailValidationMessage(targetEmail);
+    if (emailIssue) {
+      themedAlert.show({
+        title: 'Check email address',
+        message: emailIssue,
+        icon: 'email-alert-outline',
+      });
+      return;
+    }
+
+    setResetLoading(true);
+    const result = await requestPasswordReset(targetEmail);
+    setResetLoading(false);
+
+    if (!result.success) {
+      themedAlert.show({
+        title: 'Reset failed',
+        message: result.message || 'Unable to send password reset email.',
+        icon: 'alert-circle-outline',
+      });
+      return;
+    }
+
+    themedAlert.show({
+      title: 'Check your email',
+      message: 'We sent you a password reset link.',
+      icon: 'email-check-outline',
+    });
+  };
+
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
+      <KeyboardAvoidingView style={styles.keyboard} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.scrollContent}
@@ -115,8 +211,8 @@ export default function LoginScreen() {
             </View>
           </View>
 
-          <TouchableOpacity style={styles.forgotPassword}>
-            <Text style={styles.forgotPasswordText}>Forgot password?</Text>
+          <TouchableOpacity style={styles.forgotPassword} onPress={handleForgotPassword} disabled={resetLoading}>
+            <Text style={styles.forgotPasswordText}>{resetLoading ? 'Sending reset...' : 'Forgot password?'}</Text>
           </TouchableOpacity>
 
           <Button title="Log In" onPress={() => handleLogin()} loading={loading} style={styles.loginBtn} />
@@ -152,19 +248,21 @@ export default function LoginScreen() {
 
         <View style={styles.footer}>
           <Text style={styles.footerText}>Don't have an account? </Text>
-          <TouchableOpacity onPress={() => router.push('/(auth)/welcome')}>
+          <TouchableOpacity onPress={openSignupChooser}>
             <Text style={styles.signupLink}>Sign up</Text>
           </TouchableOpacity>
         </View>
       </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: COLORS.background },
+  keyboard: { flex: 1 },
   scroll: { flex: 1 },
-  scrollContent: { paddingHorizontal: SPACING.lg, paddingTop: SPACING.lg, paddingBottom: SPACING.xxl },
+  scrollContent: { paddingHorizontal: SPACING.lg, paddingTop: SPACING.lg, paddingBottom: 140 },
   backBtn: { width: 40, height: 40, justifyContent: 'center', marginBottom: SPACING.lg },
   header: { marginBottom: SPACING.xl },
   title: { fontSize: 30, fontWeight: '900', color: COLORS.text, marginBottom: 6 },

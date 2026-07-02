@@ -1,68 +1,117 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
-  View, Text, StyleSheet, SafeAreaView, ScrollView,
-  TouchableOpacity, Image, Alert, TextInput, Modal,
+  View, Text, StyleSheet, ScrollView,
+  TouchableOpacity, Image, TextInput, Modal, KeyboardAvoidingView, Platform, ActivityIndicator,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import { format } from 'date-fns';
 import { COLORS, SPACING, BORDER_RADIUS } from '../lib/constants';
 import { useAppStore, PortfolioItem } from '../store/useAppStore';
 import { Button } from '../components/ui/Button';
+import { useThemedAlert } from '../components/ui/ThemedAlertProvider';
+import { formatCurrency, getDeviceCurrency } from '../lib/payments';
 
 export default function ProfileScreen() {
   const router = useRouter();
-  const { user, profilePhoto, portfolioItems, setProfilePhoto, addPortfolioItem, removePortfolioItem, logout } = useAppStore();
+  const { user, profilePhoto, portfolioItems, invoices, setProfilePhoto, addPortfolioItem, removePortfolioItem, setActiveRole, addAccountRole, logout } = useAppStore();
+  const currency = useMemo(() => getDeviceCurrency(), []);
+  const themedAlert = useThemedAlert();
   const [captionModal, setCaptionModal] = useState(false);
   const [pendingUri, setPendingUri] = useState('');
   const [caption, setCaption] = useState('');
+  const [savingProfilePhoto, setSavingProfilePhoto] = useState(false);
   const isTrade = user?.role === 'tradesperson';
+  const accountRoles = user?.roles?.length ? user.roles : user?.role ? [user.role] : [];
+  const canUseCustomer = accountRoles.includes('customer');
+  const canUseTrade = accountRoles.includes('tradesperson');
 
   const pickProfilePhoto = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') {
-      Alert.alert('Permission needed', 'Please allow access to your photo library.');
+      themedAlert.show({
+        title: 'Permission needed',
+        message: 'Please allow access to your photo library.',
+        icon: 'image-lock-outline',
+      });
       return;
     }
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ['images'],
       allowsEditing: true, aspect: [1, 1], quality: 0.8,
     });
     if (!result.canceled && result.assets[0]) {
-      setProfilePhoto(result.assets[0].uri);
+      setSavingProfilePhoto(true);
+      try {
+        await setProfilePhoto(result.assets[0].uri);
+      } catch (error) {
+        themedAlert.show({
+          title: 'Photo upload failed',
+          message: error instanceof Error ? error.message : 'Could not save this profile photo. Please try another image.',
+          icon: 'image-off-outline',
+        });
+      } finally {
+        setSavingProfilePhoto(false);
+      }
     }
   };
 
   const takeProfilePhoto = async () => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
     if (status !== 'granted') {
-      Alert.alert('Permission needed', 'Please allow camera access.');
+      themedAlert.show({
+        title: 'Permission needed',
+        message: 'Please allow camera access.',
+        icon: 'camera-lock-outline',
+      });
       return;
     }
     const result = await ImagePicker.launchCameraAsync({
       allowsEditing: true, aspect: [1, 1], quality: 0.8,
     });
     if (!result.canceled && result.assets[0]) {
-      setProfilePhoto(result.assets[0].uri);
+      setSavingProfilePhoto(true);
+      try {
+        await setProfilePhoto(result.assets[0].uri);
+      } catch (error) {
+        themedAlert.show({
+          title: 'Photo upload failed',
+          message: error instanceof Error ? error.message : 'Could not save this profile photo. Please try another image.',
+          icon: 'image-off-outline',
+        });
+      } finally {
+        setSavingProfilePhoto(false);
+      }
     }
   };
 
   const handleProfilePhotoPress = () => {
-    Alert.alert('Profile Photo', 'Choose an option', [
-      { text: 'Take Photo', onPress: takeProfilePhoto },
-      { text: 'Choose from Library', onPress: pickProfilePhoto },
-      { text: 'Cancel', style: 'cancel' },
-    ]);
+    themedAlert.show({
+      title: 'Profile Photo',
+      message: 'Update your profile image from the camera or your library.',
+      icon: 'account-circle-outline',
+      actions: [
+        { label: 'Take Photo', icon: 'camera-outline', onPress: takeProfilePhoto },
+        { label: 'Choose from Library', icon: 'image-outline', onPress: pickProfilePhoto },
+        { label: 'Cancel', variant: 'ghost' },
+      ],
+    });
   };
 
   const pickPortfolioPhoto = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') {
-      Alert.alert('Permission needed', 'Please allow access to your photo library.');
+      themedAlert.show({
+        title: 'Permission needed',
+        message: 'Please allow access to your photo library.',
+        icon: 'image-lock-outline',
+      });
       return;
     }
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ['images'],
       allowsEditing: true, quality: 0.8,
     });
     if (!result.canceled && result.assets[0]) {
@@ -84,13 +133,61 @@ export default function ProfileScreen() {
   };
 
   const confirmRemove = (id: string) => {
-    Alert.alert('Remove Photo', 'Remove this from your portfolio?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Remove', style: 'destructive', onPress: () => removePortfolioItem(id) },
-    ]);
+    themedAlert.show({
+      title: 'Remove Photo',
+      message: 'Remove this from your portfolio?',
+      icon: 'image-remove-outline',
+      actions: [
+        { label: 'Remove', variant: 'danger', icon: 'trash-can-outline', onPress: () => removePortfolioItem(id) },
+        { label: 'Cancel', variant: 'ghost' },
+      ],
+    });
   };
 
   const isVerified = !!user?.licenseNumber;
+
+  const switchMode = async (role: 'customer' | 'tradesperson') => {
+    if (user?.role === role) return;
+    const result = await setActiveRole(role);
+    if (!result.success) {
+      themedAlert.show({
+        title: 'Could not switch mode',
+        message: result.message || 'Try again.',
+        icon: 'alert-circle-outline',
+      });
+      return;
+    }
+    router.replace(role === 'customer' ? '/customer-home' : '/(tabs)');
+  };
+
+  const addMode = (role: 'customer' | 'tradesperson') => {
+    themedAlert.show({
+      title: role === 'customer' ? 'Add customer mode?' : 'Add service pro mode?',
+      message: role === 'customer'
+        ? 'You will be able to hire pros and post jobs from this same account.'
+        : 'You will be able to accept work, send quotes, invoices, and manage jobs from this same account.',
+      icon: role === 'customer' ? 'home-search-outline' : 'briefcase-outline',
+      actions: [
+        {
+          label: 'Add Mode',
+          icon: 'plus-circle-outline',
+          onPress: async () => {
+            const result = await addAccountRole(role);
+            if (!result.success) {
+              themedAlert.show({
+                title: 'Could not add mode',
+                message: result.message || 'Try again.',
+                icon: 'alert-circle-outline',
+              });
+              return;
+            }
+            await switchMode(role);
+          },
+        },
+        { label: 'Cancel', variant: 'ghost' },
+      ],
+    });
+  };
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -114,6 +211,11 @@ export default function ProfileScreen() {
                 <Text style={styles.avatarInitial}>{user?.name?.charAt(0) || 'F'}</Text>
               </View>
             )}
+            {savingProfilePhoto ? (
+              <View style={styles.avatarLoading}>
+                <ActivityIndicator color={COLORS.primary} />
+              </View>
+            ) : null}
             <View style={styles.cameraOverlay}>
               <MaterialCommunityIcons name="camera" size={16} color="#fff" />
             </View>
@@ -143,6 +245,37 @@ export default function ProfileScreen() {
           </View>
         </View>
 
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Account Modes</Text>
+          <View style={styles.modeCard}>
+            <TouchableOpacity
+              style={[styles.modeButton, user?.role === 'customer' && styles.modeButtonActive, !canUseCustomer && styles.modeButtonLocked]}
+              onPress={() => canUseCustomer ? switchMode('customer') : addMode('customer')}
+              activeOpacity={0.86}
+            >
+              <MaterialCommunityIcons name="home-search-outline" size={20} color={user?.role === 'customer' ? COLORS.primary : COLORS.textSecondary} />
+              <View style={styles.modeCopy}>
+                <Text style={styles.modeTitle}>Customer</Text>
+                <Text style={styles.modeText}>{canUseCustomer ? 'Hire pros and post jobs' : 'Add this mode'}</Text>
+              </View>
+              {user?.role === 'customer' && <Text style={styles.activePill}>Active</Text>}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.modeButton, user?.role === 'tradesperson' && styles.modeButtonActive, !canUseTrade && styles.modeButtonLocked]}
+              onPress={() => canUseTrade ? switchMode('tradesperson') : addMode('tradesperson')}
+              activeOpacity={0.86}
+            >
+              <MaterialCommunityIcons name="briefcase-outline" size={20} color={user?.role === 'tradesperson' ? COLORS.primary : COLORS.textSecondary} />
+              <View style={styles.modeCopy}>
+                <Text style={styles.modeTitle}>Service Pro</Text>
+                <Text style={styles.modeText}>{canUseTrade ? 'Quote, invoice, and manage jobs' : 'Add this mode'}</Text>
+              </View>
+              {user?.role === 'tradesperson' && <Text style={styles.activePill}>Active</Text>}
+            </TouchableOpacity>
+          </View>
+        </View>
+
         {/* Info Cards */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Details</Text>
@@ -153,7 +286,7 @@ export default function ProfileScreen() {
               ...(isTrade ? [
                 { icon: 'map-marker-outline', label: 'Service Area', value: user?.serviceArea || 'Not set' },
                 {
-                  icon: 'cash-outline',
+                    icon: 'cash-multiple',
                   label: 'Pricing',
                   value: user?.pricingMode === 'hourly'
                     ? (user?.hourlyRate ? `$${user.hourlyRate}/hr` : 'Hourly')
@@ -254,22 +387,98 @@ export default function ProfileScreen() {
           </View>
         )}
 
+        {/* Job History shortcut */}
+        <View style={styles.section}>
+          <TouchableOpacity
+            style={styles.historyShortcut}
+            onPress={() => router.push('/job-history')}
+            activeOpacity={0.8}
+          >
+            <View style={styles.historyShortcutIcon}>
+              <MaterialCommunityIcons name="briefcase-clock-outline" size={22} color={COLORS.primary} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.historyShortcutTitle}>Job History</Text>
+              <Text style={styles.historyShortcutSub}>View completed & cancelled jobs</Text>
+            </View>
+            <MaterialCommunityIcons name="chevron-right" size={20} color={COLORS.textMuted} />
+          </TouchableOpacity>
+        </View>
+
+        {/* Payment History */}
+        {(() => {
+          const history = invoices
+            .filter(inv => inv.paymentStatus === 'fully_paid' || inv.paymentStatus === 'deposit_paid')
+            .sort((a, b) => new Date(b.paidAt || b.depositPaidAt || b.createdAt).getTime() - new Date(a.paidAt || a.depositPaidAt || a.createdAt).getTime())
+            .slice(0, 20);
+          return (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Payment History</Text>
+              {history.length === 0 ? (
+                <View style={styles.historyEmpty}>
+                  <MaterialCommunityIcons name="history" size={32} color={COLORS.textMuted} />
+                  <Text style={styles.historyEmptyText}>No payments yet</Text>
+                </View>
+              ) : (
+                <View style={styles.historyList}>
+                  {history.map((inv, i) => {
+                    const paidDate = inv.paidAt || inv.depositPaidAt;
+                    const isFullyPaid = inv.paymentStatus === 'fully_paid';
+                    const displayAmount = isFullyPaid ? inv.total : (inv.depositAmount || 0);
+                    return (
+                      <TouchableOpacity
+                        key={inv.id}
+                        style={[styles.historyRow, i > 0 && styles.historyRowBorder]}
+                        onPress={() => router.push({ pathname: '/invoice-view', params: { invoiceId: inv.id } })}
+                        activeOpacity={0.7}
+                      >
+                        <View style={[styles.historyIcon, { backgroundColor: isFullyPaid ? COLORS.success + '18' : COLORS.warning + '18' }]}>
+                          <MaterialCommunityIcons
+                            name={isFullyPaid ? 'check-circle-outline' : 'clock-outline'}
+                            size={20}
+                            color={isFullyPaid ? COLORS.success : COLORS.warning}
+                          />
+                        </View>
+                        <View style={styles.historyInfo}>
+                          <Text style={styles.historyJob} numberOfLines={1}>{inv.jobDescription}</Text>
+                          <Text style={styles.historyDate}>
+                            {isFullyPaid ? 'Paid in full' : 'Deposit paid'}{paidDate ? ` · ${format(new Date(paidDate), 'MMM d, yyyy')}` : ''}
+                          </Text>
+                        </View>
+                        <Text style={[styles.historyAmount, { color: isTrade ? COLORS.success : COLORS.text }]}>
+                          {isTrade ? '+' : ''}{formatCurrency(displayAmount, currency)}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              )}
+            </View>
+          );
+        })()}
+
         {/* Sign out */}
         <View style={styles.section}>
           <Button
             title="Sign Out"
             variant="secondary"
-            onPress={() => Alert.alert('Sign Out', 'Are you sure?', [
-              { text: 'Cancel', style: 'cancel' },
+            onPress={() => themedAlert.show({
+              title: 'Sign Out',
+              message: 'Are you sure you want to sign out?',
+              icon: 'logout',
+              actions: [
               {
-                text: 'Sign Out',
-                style: 'destructive',
+                label: 'Sign Out',
+                variant: 'danger',
+                icon: 'logout',
                 onPress: async () => {
                   await logout();
                   router.replace('/(auth)/welcome');
                 },
               },
-            ])}
+              { label: 'Cancel', variant: 'ghost' },
+              ],
+            })}
           />
         </View>
 
@@ -278,9 +487,16 @@ export default function ProfileScreen() {
 
       {/* Caption Modal */}
       <Modal visible={captionModal} animationType="slide" transparent>
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => setCaptionModal(false)} />
           <View style={styles.modal}>
-            <Text style={styles.modalTitle}>Add a Caption</Text>
+            <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Add a Caption</Text>
+              <TouchableOpacity style={styles.modalClose} onPress={() => setCaptionModal(false)}>
+                <MaterialCommunityIcons name="close" size={20} color={COLORS.textSecondary} />
+              </TouchableOpacity>
+            </View>
             {pendingUri && (
               <Image source={{ uri: pendingUri }} style={styles.previewImage} resizeMode="cover" />
             )}
@@ -295,8 +511,9 @@ export default function ProfileScreen() {
               <Button title="Skip" variant="secondary" onPress={savePortfolioItem} style={{ flex: 1 }} />
               <Button title="Save" onPress={savePortfolioItem} style={{ flex: 1 }} />
             </View>
+            </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </SafeAreaView>
   );
@@ -313,6 +530,7 @@ const styles = StyleSheet.create({
   avatarImage: { width: 100, height: 100, borderRadius: 50 },
   avatarPlaceholder: { width: 100, height: 100, borderRadius: 50, backgroundColor: COLORS.primary, alignItems: 'center', justifyContent: 'center' },
   avatarInitial: { fontSize: 40, fontWeight: '900', color: '#fff' },
+  avatarLoading: { position: 'absolute', width: 100, height: 100, borderRadius: 50, alignItems: 'center', justifyContent: 'center', backgroundColor: '#00000088' },
   cameraOverlay: { position: 'absolute', bottom: 0, right: 0, width: 32, height: 32, borderRadius: 16, backgroundColor: COLORS.primary, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: COLORS.background },
   profileInfo: { alignItems: 'center', gap: 4 },
   nameRow: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm },
@@ -325,6 +543,28 @@ const styles = StyleSheet.create({
   section: { paddingHorizontal: SPACING.lg, marginTop: SPACING.lg },
   sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACING.md },
   sectionTitle: { fontSize: 17, fontWeight: '700', color: COLORS.text, marginBottom: SPACING.md },
+  modeCard: { gap: SPACING.sm },
+  modeButton: { flexDirection: 'row', alignItems: 'center', gap: SPACING.md, backgroundColor: COLORS.surface, borderRadius: BORDER_RADIUS.lg, padding: SPACING.md, borderWidth: 1, borderColor: COLORS.border },
+  modeButtonActive: { borderColor: COLORS.primary + '66', backgroundColor: COLORS.primary + '10' },
+  modeButtonLocked: { borderStyle: 'dashed' },
+  modeCopy: { flex: 1 },
+  modeTitle: { fontSize: 14, color: COLORS.text, fontWeight: '800', marginBottom: 2 },
+  modeText: { fontSize: 12, color: COLORS.textSecondary },
+  historyEmpty: { alignItems: 'center', paddingVertical: SPACING.xl, gap: SPACING.sm },
+  historyEmptyText: { fontSize: 14, color: COLORS.textMuted },
+  historyList: { backgroundColor: COLORS.surface, borderRadius: BORDER_RADIUS.lg, borderWidth: 1, borderColor: COLORS.border, overflow: 'hidden' },
+  historyRow: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm, padding: SPACING.md },
+  historyRowBorder: { borderTopWidth: 1, borderTopColor: COLORS.border },
+  historyIcon: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
+  historyInfo: { flex: 1 },
+  historyJob: { fontSize: 14, fontWeight: '600', color: COLORS.text, marginBottom: 2 },
+  historyDate: { fontSize: 12, color: COLORS.textMuted },
+  historyAmount: { fontSize: 15, fontWeight: '800' },
+  historyShortcut: { flexDirection: 'row', alignItems: 'center', gap: SPACING.md, backgroundColor: COLORS.surface, borderRadius: BORDER_RADIUS.lg, padding: SPACING.md, borderWidth: 1, borderColor: COLORS.border },
+  historyShortcutIcon: { width: 44, height: 44, borderRadius: BORDER_RADIUS.md, backgroundColor: COLORS.primary + '14', alignItems: 'center', justifyContent: 'center' },
+  historyShortcutTitle: { fontSize: 15, fontWeight: '700', color: COLORS.text },
+  historyShortcutSub: { fontSize: 12, color: COLORS.textSecondary, marginTop: 2 },
+  activePill: { fontSize: 11, color: COLORS.primary, fontWeight: '900', paddingHorizontal: 8, paddingVertical: 4, borderRadius: BORDER_RADIUS.full, backgroundColor: COLORS.primary + '16' },
   addBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: COLORS.primary + '18', paddingHorizontal: 12, paddingVertical: 6, borderRadius: BORDER_RADIUS.full, borderWidth: 1, borderColor: COLORS.primary + '33' },
   addBtnText: { fontSize: 13, fontWeight: '700', color: COLORS.primary },
   infoCard: { backgroundColor: COLORS.surface, borderRadius: BORDER_RADIUS.lg, borderWidth: 1, borderColor: COLORS.border, overflow: 'hidden' },
@@ -350,8 +590,11 @@ const styles = StyleSheet.create({
   removeBtn: { position: 'absolute', top: 4, right: 4, width: 22, height: 22, borderRadius: 11, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center' },
   addPortfolioTile: { width: '31%', aspectRatio: 1, borderRadius: BORDER_RADIUS.md, backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.border, borderStyle: 'dashed', alignItems: 'center', justifyContent: 'center' },
   modalOverlay: { flex: 1, backgroundColor: '#000000BB', justifyContent: 'flex-end' },
-  modal: { backgroundColor: COLORS.surface, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: SPACING.lg, paddingBottom: 40 },
-  modalTitle: { fontSize: 20, fontWeight: '800', color: COLORS.text, marginBottom: SPACING.md },
+  modal: { maxHeight: '90%', backgroundColor: COLORS.surface, borderTopLeftRadius: 28, borderTopRightRadius: 28 },
+  modalContent: { padding: SPACING.lg, paddingBottom: 150 },
+  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: SPACING.md },
+  modalTitle: { fontSize: 20, fontWeight: '800', color: COLORS.text },
+  modalClose: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.surfaceLight, borderWidth: 1, borderColor: COLORS.border },
   previewImage: { width: '100%', height: 200, borderRadius: BORDER_RADIUS.lg, marginBottom: SPACING.md },
   captionInput: { backgroundColor: COLORS.surfaceLight, borderRadius: BORDER_RADIUS.md, padding: SPACING.md, color: COLORS.text, fontSize: 15, borderWidth: 1, borderColor: COLORS.border, marginBottom: SPACING.md },
   modalActions: { flexDirection: 'row', gap: SPACING.sm },

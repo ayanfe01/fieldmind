@@ -11,6 +11,7 @@ import {
   saveClient,
   saveInvoice,
   saveJob,
+  saveRating,
   saveConversation,
   saveMessage,
   savePortfolioItem,
@@ -20,7 +21,7 @@ import {
   uploadProfilePhoto,
   upsertProfile,
 } from '../lib/cloudData';
-import { User, UserRole, TradeType, PropertyType, PricingMode, Client, Quote, Invoice, Job, DashboardStats, Conversation, ChatMessage } from '../lib/types';
+import { User, UserRole, TradeType, PropertyType, PricingMode, Client, Quote, Invoice, Job, Rating, DashboardStats, Conversation, ChatMessage } from '../lib/types';
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -62,6 +63,7 @@ interface AppState {
   quotes: Quote[];
   invoices: Invoice[];
   jobs: Job[];
+  ratings: Rating[];
   conversations: Conversation[];
   messages: ChatMessage[];
   withdrawals: WithdrawalRecord[];
@@ -97,6 +99,7 @@ interface AppState {
   addJob: (job: Job) => void;
   updateJob: (id: string, updates: Partial<Job>) => void;
   assignJobToPro: (jobId: string, proId: string, proName: string) => void;
+  addRating: (rating: Rating) => void;
   startConversation: (input: { participantId: string; participantName: string; participantRole: UserRole; participantUserId?: string; participantPhoto?: string | null; jobId?: string; subject?: string; quoteRequested?: boolean; initialMessage?: string }) => string;
   addMessage: (conversationId: string, text: string, attachment?: { uri: string; type: 'image' }, action?: Pick<ChatMessage, 'actionType' | 'actionLabel' | 'actionPayload'>) => Promise<void>;
   deleteConversation: (id: string) => void;
@@ -231,6 +234,7 @@ const emptyUserData = {
   quotes: [],
   invoices: [],
   jobs: [],
+  ratings: [],
   conversations: [],
   messages: [],
   withdrawals: [],
@@ -292,10 +296,38 @@ const dedupeConversations = (state: Partial<AppState>, currentUserId: string): P
   return { ...state, conversations, messages };
 };
 
+// Derive pro wallet balances from invoices so they stay in sync
+// with payments made by customers (even after cloud refresh).
+const computeBalances = (invoices: Invoice[], withdrawals: WithdrawalRecord[]) => {
+  const totalPaid = invoices
+    .filter(i => i.paymentStatus === 'fully_paid' || i.status === 'paid')
+    .reduce((sum, i) => sum + i.total, 0);
+  const totalDepositHeld = invoices
+    .filter(i => i.paymentStatus === 'deposit_paid')
+    .reduce((sum, i) => sum + (i.depositAmount || 0), 0);
+  const totalWithdrawn = withdrawals
+    .filter(w => w.status !== 'failed')
+    .reduce((sum, w) => sum + w.amount, 0);
+  const pendingBalance = invoices
+    .filter(i => i.status === 'sent' || i.status === 'overdue')
+    .reduce((sum, i) => sum + i.total, 0);
+  const availableBalance = Math.max(0, totalPaid + totalDepositHeld - totalWithdrawn);
+  return { availableBalance, pendingBalance, totalWithdrawn };
+};
+
 const loadCloudData = async (setState: (state: Partial<AppState>) => void, user: User) => {
   await upsertProfile(user);
   const cloudState = await fetchCloudState();
-  setState(dedupeConversations(cloudState, user.id));
+  const deduped = dedupeConversations(cloudState, user.id);
+  const balances = computeBalances(
+    (deduped.invoices as Invoice[]) || [],
+    (deduped.withdrawals as WithdrawalRecord[]) || []
+  );
+  setState({
+    ...deduped,
+    ratings: (cloudState.ratings as Rating[]) || [],
+    ...balances,
+  });
 };
 
 const relatedJobPaymentUpdates = (job: Job, invoice: Invoice): Partial<Job> => {
@@ -325,6 +357,7 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
   quotes: [],
   invoices: [],
   jobs: [],
+  ratings: [],
   conversations: [],
   messages: [],
   withdrawals: [],
@@ -597,9 +630,12 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
         ? s.jobs.find(job => job.invoiceId === invoice.id || (invoice.quoteId && job.quoteId === invoice.quoteId))
         : undefined;
       const jobUpdates = invoice && relatedJob ? relatedJobPaymentUpdates(relatedJob, invoice) : {};
+      const updatedInvoices = s.invoices.map(i => i.id === id ? { ...i, ...updates } : i);
+      const balances = computeBalances(updatedInvoices, s.withdrawals);
 
       return {
-        invoices: s.invoices.map(i => i.id === id ? { ...i, ...updates } : i),
+        invoices: updatedInvoices,
+        ...balances,
         jobs: Object.keys(jobUpdates).length
           ? s.jobs.map(job => job.id === relatedJob?.id ? { ...job, ...jobUpdates } : job)
           : s.jobs,
@@ -638,6 +674,12 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
       status: 'in_progress',
     };
     get().updateJob(jobId, updates);
+  },
+
+  addRating: (rating) => {
+    const next = { ...rating, id: rating.id || generateId() };
+    set((s) => ({ ratings: [next, ...s.ratings.filter(r => r.jobId !== next.jobId || r.raterId !== next.raterId)] }));
+    void saveRating(next);
   },
   startConversation: (input) => {
     const user = get().user;
@@ -785,6 +827,7 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
     quotes: state.quotes,
     invoices: state.invoices,
     jobs: state.jobs,
+    ratings: state.ratings,
     conversations: state.conversations,
     messages: state.messages,
     withdrawals: state.withdrawals,

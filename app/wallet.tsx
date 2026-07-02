@@ -1,19 +1,30 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
-  View, Text, StyleSheet, SafeAreaView, ScrollView,
-  TouchableOpacity, Modal, TextInput, Alert,
+  View, Text, StyleSheet, ScrollView,
+  TouchableOpacity, Modal, TextInput, KeyboardAvoidingView, Platform,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { COLORS, SPACING, BORDER_RADIUS } from '../lib/constants';
-import { formatCurrency } from '../lib/payments';
+import { formatCurrency, getDeviceCurrency } from '../lib/payments';
 import { useAppStore } from '../store/useAppStore';
 import { Button } from '../components/ui/Button';
+import { useThemedAlert } from '../components/ui/ThemedAlertProvider';
 import { format } from 'date-fns';
 
 export default function WalletScreen() {
   const router = useRouter();
   const { availableBalance, pendingBalance, totalWithdrawn, withdrawals, requestWithdrawal } = useAppStore();
+  const themedAlert = useThemedAlert();
+  const currency = useMemo(() => getDeviceCurrency(), []);
+  const currencySymbol = useMemo(() => {
+    try {
+      return (0).toLocaleString(undefined, { style: 'currency', currency, minimumFractionDigits: 0, maximumFractionDigits: 0 }).replace(/[\d\s,]/g, '').trim();
+    } catch {
+      return '$';
+    }
+  }, [currency]);
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
   const [withdrawAmount, setWithdrawAmount] = useState('');
   const [bankLast4, setBankLast4] = useState('4242');
@@ -23,15 +34,27 @@ export default function WalletScreen() {
   const handleWithdraw = async () => {
     const amount = parseFloat(withdrawAmount);
     if (!amount || amount <= 0) {
-      Alert.alert('Invalid amount', 'Please enter a valid amount.');
+      themedAlert.show({
+        title: 'Invalid amount',
+        message: 'Please enter a valid amount.',
+        icon: 'cash-remove',
+      });
       return;
     }
     if (amount > availableBalance) {
-      Alert.alert('Insufficient balance', `Your available balance is ${formatCurrency(availableBalance)}`);
+      themedAlert.show({
+        title: 'Insufficient balance',
+        message: `Your available balance is ${formatCurrency(availableBalance)}`,
+        icon: 'wallet-outline',
+      });
       return;
     }
     if (amount < 10) {
-      Alert.alert('Minimum withdrawal', 'Minimum withdrawal amount is $10.00');
+      themedAlert.show({
+        title: 'Minimum withdrawal',
+        message: 'Minimum withdrawal amount is $10.00',
+        icon: 'bank-transfer-out',
+      });
       return;
     }
 
@@ -76,7 +99,7 @@ export default function WalletScreen() {
           <View style={styles.balanceCardBg} />
           <Text style={styles.balanceLabel}>Available to Withdraw</Text>
           <Text style={styles.balanceAmount}>{formatCurrency(availableBalance)}</Text>
-          <Text style={styles.balanceNote}>Funds released after client job verification</Text>
+          <Text style={styles.balanceNote}>Received from customer payments · ready to withdraw</Text>
 
           <TouchableOpacity
             style={styles.withdrawBtn}
@@ -110,9 +133,9 @@ export default function WalletScreen() {
           <Text style={styles.sectionTitle}>How Payments Work</Text>
           <View style={styles.stepsCard}>
             {[
-              { icon: 'cash-fast', color: COLORS.primary, title: 'Client pays via FieldMind', desc: 'Funds are held securely in escrow' },
-              { icon: 'briefcase-check-outline', color: COLORS.warning, title: 'You complete the job', desc: 'Client verifies work is done' },
-              { icon: 'bank-transfer', color: COLORS.success, title: 'Funds released to your balance', desc: 'Withdraw anytime to your bank' },
+              { icon: 'cash-fast', color: COLORS.primary, title: 'Customer pays via FieldMind', desc: 'Deposit or full payment collected securely' },
+              { icon: 'briefcase-check-outline', color: COLORS.warning, title: 'You complete the job', desc: 'Final payment collected after work is done' },
+              { icon: 'bank-transfer', color: COLORS.success, title: 'Funds added to your balance', desc: 'Withdraw anytime, arrives in 1–2 business days' },
             ].map((step, i) => (
               <View key={i} style={styles.step}>
                 <View style={[styles.stepIcon, { backgroundColor: step.color + '18' }]}>
@@ -165,8 +188,10 @@ export default function WalletScreen() {
 
       {/* Withdraw Modal */}
       <Modal visible={showWithdrawModal} animationType="slide" transparent>
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => setShowWithdrawModal(false)} />
           <View style={styles.modal}>
+            <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.modalContent}>
             {!success ? (
               <>
                 <View style={styles.modalHeader}>
@@ -183,7 +208,7 @@ export default function WalletScreen() {
 
                 <Text style={styles.inputLabel}>Amount to withdraw</Text>
                 <View style={styles.amountInputRow}>
-                  <Text style={styles.currencySymbol}>$</Text>
+                  <Text style={styles.currencySymbol}>{currencySymbol}</Text>
                   <TextInput
                     style={styles.amountInput}
                     placeholder="0.00"
@@ -244,8 +269,9 @@ export default function WalletScreen() {
                 </Text>
               </View>
             )}
+            </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </SafeAreaView>
   );
@@ -294,7 +320,8 @@ const styles = StyleSheet.create({
   emptyCard: { backgroundColor: COLORS.surface, borderRadius: BORDER_RADIUS.lg, padding: SPACING.xl, alignItems: 'center', gap: SPACING.sm, borderWidth: 1, borderColor: COLORS.border },
   emptyText: { fontSize: 14, color: COLORS.textSecondary },
   modalOverlay: { flex: 1, backgroundColor: '#000000BB', justifyContent: 'flex-end' },
-  modal: { backgroundColor: COLORS.surface, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: SPACING.lg, paddingBottom: 40 },
+  modal: { maxHeight: '90%', backgroundColor: COLORS.surface, borderTopLeftRadius: 28, borderTopRightRadius: 28 },
+  modalContent: { padding: SPACING.lg, paddingBottom: 150 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACING.md },
   modalTitle: { fontSize: 20, fontWeight: '800', color: COLORS.text },
   modalBalance: { backgroundColor: COLORS.surfaceLight, borderRadius: BORDER_RADIUS.md, padding: SPACING.md, alignItems: 'center', marginBottom: SPACING.lg, borderWidth: 1, borderColor: COLORS.border },

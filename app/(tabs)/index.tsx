@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { View, Text, ScrollView, StyleSheet, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
@@ -8,18 +8,22 @@ import { useAppStore } from '../../store/useAppStore';
 import { StatCard } from '../../components/cards/StatCard';
 import { StatusBadge } from '../../components/ui/StatusBadge';
 import { COLORS, SPACING, BORDER_RADIUS } from '../../lib/constants';
+import { Avatar } from '../../components/ui/Avatar';
+import { formatCurrency, getDeviceCurrency } from '../../lib/payments';
 
 export default function HomeScreen() {
   const router = useRouter();
-  const { user, jobs, invoices, getDashboardStats, availableBalance, pendingBalance } = useAppStore();
+  const { user, jobs, invoices, getDashboardStats, availableBalance, pendingBalance, profilePhoto } = useAppStore();
   const stats = getDashboardStats();
+  const currency = useMemo(() => getDeviceCurrency(), []);
   const today = new Date().toISOString().split('T')[0];
-  const todayJobs = jobs.filter(job => job.scheduledDate === today && (job.status === 'scheduled' || job.status === 'in_progress'));
+  const ownJobs = jobs.filter(job => !job.ownerId || job.ownerId === user?.id);
+  const openMarketplaceJobs = jobs.filter(job => job.ownerId && job.ownerId !== user?.id && job.status === 'scheduled').slice(0, 3);
+  const todayJobs = ownJobs.filter(job => job.scheduledDate === today && (job.status === 'scheduled' || job.status === 'in_progress'));
   const recentInvoices = invoices.slice(0, 3);
   const h = new Date().getHours();
   const greeting = h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
   const pendingTotal = invoices.filter(invoice => invoice.status === 'sent').reduce((sum, invoice) => sum + invoice.total, 0);
-  const initial = user?.name?.charAt(0) || 'F';
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -31,7 +35,7 @@ export default function HomeScreen() {
             <Text style={styles.business}>{user?.businessName}</Text>
           </View>
           <TouchableOpacity style={styles.avatar} onPress={() => router.push('/profile')}>
-            <Text style={styles.avatarText}>{initial}</Text>
+            <Avatar name={user?.name} uri={profilePhoto} size={52} />
           </TouchableOpacity>
         </View>
 
@@ -39,10 +43,10 @@ export default function HomeScreen() {
         <TouchableOpacity style={styles.walletCard} onPress={() => router.push('/wallet')} activeOpacity={0.85}>
           <View style={styles.walletLeft}>
             <Text style={styles.walletLabel}>Available Balance</Text>
-            <Text style={styles.walletAmount}>${availableBalance.toLocaleString('en-US', { minimumFractionDigits: 2 })}</Text>
+            <Text style={styles.walletAmount}>{formatCurrency(availableBalance, currency)}</Text>
             <View style={styles.walletPending}>
               <MaterialCommunityIcons name="clock-outline" size={12} color={COLORS.warning} />
-              <Text style={styles.walletPendingText}>${pendingBalance.toFixed(2)} pending verification</Text>
+              <Text style={styles.walletPendingText}>{formatCurrency(pendingBalance, currency)} awaiting payment</Text>
             </View>
           </View>
           <View style={styles.walletRight}>
@@ -103,32 +107,61 @@ export default function HomeScreen() {
 
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Open Customer Jobs</Text>
+            <TouchableOpacity onPress={() => router.push('/(tabs)/jobs')}>
+              <Text style={styles.seeAll}>Browse</Text>
+            </TouchableOpacity>
+          </View>
+          {openMarketplaceJobs.length === 0 ? (
+            <View style={styles.emptyCard}>
+              <MaterialCommunityIcons name="briefcase-search-outline" size={30} color={COLORS.primary} />
+              <Text style={styles.emptyText}>No open jobs yet</Text>
+            </View>
+          ) : openMarketplaceJobs.map(job => (
+            <TouchableOpacity key={job.id} style={styles.jobCard} onPress={() => router.push('/(tabs)/jobs')} activeOpacity={0.85}>
+              <View style={styles.jobTime}>
+                <Text style={styles.jobTimeText}>{job.budgetRange || 'Quote'}</Text>
+              </View>
+              <View style={styles.jobInfo}>
+                <Text style={styles.jobTitle}>{job.title}</Text>
+                <View style={styles.metaRow}>
+                  <MaterialCommunityIcons name="briefcase-outline" size={13} color={COLORS.textMuted} />
+                  <Text style={styles.jobAddress}>{job.customCategory || job.category || 'Service request'}</Text>
+                </View>
+              </View>
+              <MaterialCommunityIcons name="chevron-right" size={20} color={COLORS.textMuted} />
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Recent Invoices</Text>
             <TouchableOpacity onPress={() => router.push('/(tabs)/invoices')}>
               <Text style={styles.seeAll}>See all</Text>
             </TouchableOpacity>
           </View>
           {recentInvoices.map(invoice => (
-            <View key={invoice.id} style={styles.invoiceCard}>
+            <TouchableOpacity key={invoice.id} style={styles.invoiceCard} onPress={() => router.push({ pathname: '/invoice-view', params: { invoiceId: invoice.id } })} activeOpacity={0.85}>
               <View style={styles.invoiceInfo}>
                 <Text style={styles.invoiceDesc} numberOfLines={1}>{invoice.jobDescription}</Text>
                 <Text style={styles.invoiceDate}>{format(new Date(invoice.createdAt), 'MMM d, yyyy')}</Text>
               </View>
               <View style={styles.invoiceRight}>
-                <Text style={styles.invoiceAmount}>${invoice.total.toFixed(2)}</Text>
+                <Text style={styles.invoiceAmount}>{formatCurrency(invoice.total, currency)}</Text>
                 <StatusBadge status={invoice.status} />
               </View>
-            </View>
+            </TouchableOpacity>
           ))}
         </View>
 
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Quick Actions</Text>
           <View style={styles.actionsGrid}>
-            <ActionButton icon="file-document-plus-outline" label="New Quote" onPress={() => router.push('/(tabs)/voice')} />
+            <ActionButton icon="file-document-plus-outline" label="AI Quote" onPress={() => router.push('/(tabs)/voice')} />
             <ActionButton icon="send-outline" label="Send Invoice" onPress={() => router.push('/(tabs)/invoices')} />
             <ActionButton icon="calendar-plus" label="Schedule Job" onPress={() => router.push('/(tabs)/schedule')} />
-            <ActionButton icon="message-text-outline" label="Message Client" onPress={() => {}} />
+            <ActionButton icon="message-text-outline" label="Messages" onPress={() => router.push('/(tabs)/messages')} />
           </View>
         </View>
       </ScrollView>
@@ -158,7 +191,7 @@ function ActionButton({
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: COLORS.background },
   scroll: { flex: 1 },
-  content: { paddingBottom: 110 },
+  content: { width: '100%', maxWidth: 860, alignSelf: 'center', paddingBottom: 110 },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -175,13 +208,9 @@ const styles = StyleSheet.create({
     width: 52,
     height: 52,
     borderRadius: 26,
-    backgroundColor: COLORS.surfaceLight,
-    borderWidth: 1,
-    borderColor: COLORS.border,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  avatarText: { fontSize: 18, fontWeight: '800', color: COLORS.text },
   section: { paddingHorizontal: SPACING.lg, marginBottom: SPACING.xl },
   sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACING.md },
   sectionTitle: { fontSize: 17, fontWeight: '800', color: COLORS.text },

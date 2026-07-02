@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import { ChatMessage, Client, Conversation, Invoice, Job, Quote, User } from './types';
+import { ChatMessage, Client, Conversation, Invoice, Job, Quote, Rating, User } from './types';
 import type { PortfolioItem, WithdrawalRecord } from '../store/useAppStore';
 
 export interface CloudState {
@@ -11,6 +11,7 @@ export interface CloudState {
   portfolioItems: PortfolioItem[];
   conversations: Conversation[];
   messages: ChatMessage[];
+  ratings: Rating[];
   profilePhoto: string | null;
 }
 
@@ -129,6 +130,7 @@ export const fetchCloudState = async (): Promise<Partial<CloudState>> => {
     portfolioResult,
     conversationsResult,
     messagesResult,
+    ratingsResult,
     profileResult,
   ] = await Promise.all([
     supabase.from('clients').select('*').order('created_at', { ascending: false }),
@@ -139,6 +141,7 @@ export const fetchCloudState = async (): Promise<Partial<CloudState>> => {
     supabase.from('portfolio_items').select('*').order('created_at', { ascending: false }),
     supabase.from('conversations').select('*').order('updated_at', { ascending: false }),
     supabase.from('messages').select('*').order('created_at', { ascending: true }),
+    supabase.from('ratings').select('*').order('created_at', { ascending: false }),
     supabase.from('profiles').select('profile_photo').eq('id', currentUserId || '').maybeSingle(),
   ]);
 
@@ -150,6 +153,7 @@ export const fetchCloudState = async (): Promise<Partial<CloudState>> => {
   logCloudError('fetch portfolio', portfolioResult.error);
   logCloudError('fetch conversations', conversationsResult.error);
   logCloudError('fetch messages', messagesResult.error);
+  logCloudError('fetch ratings', ratingsResult.error);
   logCloudError('fetch profile', profileResult.error);
 
   return {
@@ -176,6 +180,12 @@ export const fetchCloudState = async (): Promise<Partial<CloudState>> => {
       createdAt: row.created_at,
       paymentTerms: row.payment_terms || undefined,
       depositPercent: row.deposit_percent == null ? undefined : Number(row.deposit_percent),
+      shareToken: row.share_token || undefined,
+      sentAt: row.sent_at || undefined,
+      viewedAt: row.viewed_at || undefined,
+      acceptedAt: row.accepted_at || undefined,
+      declinedAt: row.declined_at || undefined,
+      signedName: row.signed_name || undefined,
     })),
     invoices: (invoicesResult.data || []).map(row => ({
       id: row.id,
@@ -227,6 +237,8 @@ export const fetchCloudState = async (): Promise<Partial<CloudState>> => {
       escrowStatus: row.escrow_status || undefined,
       customerVerifiedAt: row.customer_verified_at || undefined,
       paymentMethod: row.payment_method || undefined,
+      completedAt: row.completed_at || undefined,
+      invoiceSentAt: row.invoice_sent_at || undefined,
     })),
     withdrawals: (withdrawalsResult.data || []).map(row => ({
       id: row.id,
@@ -270,6 +282,17 @@ export const fetchCloudState = async (): Promise<Partial<CloudState>> => {
       actionType: row.action_type || undefined,
       actionLabel: row.action_label || undefined,
       actionPayload: row.action_payload || undefined,
+      createdAt: row.created_at,
+    })),
+    ratings: (ratingsResult.data || []).map(row => ({
+      id: row.id,
+      jobId: row.job_id,
+      invoiceId: row.invoice_id || undefined,
+      raterId: row.rater_id,
+      raterName: row.rater_name,
+      ratedUserId: row.rated_user_id,
+      stars: Number(row.stars),
+      review: row.review || undefined,
       createdAt: row.created_at,
     })),
     profilePhoto: profileResult.data?.profile_photo || null,
@@ -331,6 +354,12 @@ export const saveQuote = async (ownerId: string, quote: Quote) => {
     valid_until: quote.validUntil,
     payment_terms: quote.paymentTerms,
     deposit_percent: quote.depositPercent,
+    share_token: quote.shareToken,
+    sent_at: quote.sentAt,
+    viewed_at: quote.viewedAt,
+    accepted_at: quote.acceptedAt,
+    declined_at: quote.declinedAt,
+    signed_name: quote.signedName,
     created_at: quote.createdAt,
   }));
   logCloudError('save quote', error);
@@ -364,6 +393,30 @@ export const saveInvoice = async (ownerId: string, invoice: Invoice) => {
   logCloudError('save invoice', error);
 };
 
+// Update ONLY payment-related fields on an invoice.
+// Uses .update() (not upsert) so it never changes owner_id.
+// This is used by customers after paying so the pro's invoice reflects the payment.
+export const recordInvoicePayment = async (invoiceId: string, fields: {
+  paidAt?: string;
+  depositPaidAt?: string;
+  depositPaymentIntentId?: string;
+  finalPaymentIntentId?: string;
+  paymentStatus?: string;
+  status?: string;
+}) => {
+  const { error } = await supabase.from('invoices')
+    .update(withoutUndefined({
+      paid_at: fields.paidAt,
+      deposit_paid_at: fields.depositPaidAt,
+      deposit_payment_intent_id: fields.depositPaymentIntentId,
+      final_payment_intent_id: fields.finalPaymentIntentId,
+      payment_status: fields.paymentStatus,
+      status: fields.status,
+    }))
+    .eq('id', invoiceId);
+  logCloudError('record invoice payment', error);
+};
+
 export const saveJob = async (ownerId: string, job: Job) => {
   const { error } = await supabase.from('jobs').upsert(withoutUndefined({
     id: job.id,
@@ -391,9 +444,26 @@ export const saveJob = async (ownerId: string, job: Job) => {
     escrow_status: job.escrowStatus,
     customer_verified_at: job.customerVerifiedAt,
     payment_method: job.paymentMethod,
+    completed_at: job.completedAt,
+    invoice_sent_at: job.invoiceSentAt,
     created_at: job.createdAt,
   }));
   logCloudError('save job', error);
+};
+
+export const saveRating = async (rating: Rating) => {
+  const { error } = await supabase.from('ratings').upsert(withoutUndefined({
+    id: rating.id,
+    job_id: rating.jobId,
+    invoice_id: rating.invoiceId,
+    rater_id: rating.raterId,
+    rater_name: rating.raterName,
+    rated_user_id: rating.ratedUserId,
+    stars: rating.stars,
+    review: rating.review,
+    created_at: rating.createdAt,
+  }));
+  logCloudError('save rating', error);
 };
 
 export const saveWithdrawal = async (ownerId: string, withdrawal: WithdrawalRecord) => {

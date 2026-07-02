@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Share } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { addDays, format } from 'date-fns';
@@ -8,6 +8,7 @@ import { StatusBadge } from '../../components/ui/StatusBadge';
 import { useThemedAlert } from '../../components/ui/ThemedAlertProvider';
 import { COLORS, SPACING, BORDER_RADIUS } from '../../lib/constants';
 import { formatCurrency } from '../../lib/payments';
+import { buildQuoteShareUrl, generateShareToken, isQuoteLinksConfigured } from '../../lib/quoteLinks';
 import { PaymentTermsType, Quote, QuoteStatus } from '../../lib/types';
 
 const FILTERS: { label: string; value: QuoteStatus | 'all' }[] = [
@@ -166,6 +167,33 @@ export default function QuotesScreen() {
     }
   };
 
+  // Public share link: works for any client, no app or account needed. The
+  // client views, e-signs, and accepts on a web page; status syncs back here.
+  const shareQuoteLink = async (quote: Quote) => {
+    if (!isQuoteLinksConfigured) {
+      themedAlert.show({
+        title: 'Not configured',
+        message: 'Quote links need the Supabase URL configured in the app environment.',
+        icon: 'link-off',
+      });
+      return;
+    }
+    const token = quote.shareToken || generateShareToken();
+    updateQuote(quote.id, {
+      shareToken: token,
+      ...(quote.status === 'draft' ? { status: 'sent' as QuoteStatus } : {}),
+      sentAt: quote.sentAt || new Date().toISOString(),
+    });
+    const client = getClient(quote.clientId);
+    try {
+      await Share.share({
+        message: `Hi${client?.name ? ` ${client.name}` : ''}, here's your quote for "${quote.jobDescription}" (${formatCurrency(quote.total)}). View and accept it here: ${buildQuoteShareUrl(token)}`,
+      });
+    } catch {
+      // user dismissed the share sheet — nothing to do
+    }
+  };
+
   const sendQuote = async (quote: Quote) => {
     const client = resolveClientForQuote(quote);
     if (!client) {
@@ -251,6 +279,13 @@ export default function QuotesScreen() {
                     <Text style={styles.clientName}>{client?.name || 'Unknown Client'}</Text>
                     <Text style={styles.jobDesc} numberOfLines={2}>{quote.jobDescription}</Text>
                     <Text style={styles.date}>Created {format(new Date(quote.createdAt), 'MMM d, yyyy')}</Text>
+                    {quote.status === 'accepted' && quote.signedName ? (
+                      <Text style={[styles.track, { color: COLORS.success }]}>✍️ Signed by {quote.signedName}{quote.acceptedAt ? ` · ${format(new Date(quote.acceptedAt), 'MMM d, h:mm a')}` : ''}</Text>
+                    ) : quote.viewedAt && quote.status === 'sent' ? (
+                      <Text style={styles.track}>👀 Viewed {format(new Date(quote.viewedAt), 'MMM d, h:mm a')}</Text>
+                    ) : quote.sentAt && quote.status === 'sent' ? (
+                      <Text style={styles.track}>🔗 Link sent {format(new Date(quote.sentAt), 'MMM d')} — not viewed yet</Text>
+                    ) : null}
                   </View>
                   <View style={styles.cardRight}>
                     <Text style={styles.amount}>{formatCurrency(quote.total)}</Text>
@@ -258,6 +293,11 @@ export default function QuotesScreen() {
                   </View>
                 </View>
                 <View style={styles.cardActions}>
+                  {(quote.status === 'draft' || quote.status === 'sent') && (
+                    <TouchableOpacity style={[styles.actionChip, styles.actionBlue]} onPress={() => void shareQuoteLink(quote)}>
+                      <Text style={[styles.actionChipText, { color: COLORS.primary }]}>🔗 Share Link</Text>
+                    </TouchableOpacity>
+                  )}
                   {quote.status === 'draft' && (
                     <TouchableOpacity style={styles.actionChip} onPress={() => sendQuote(quote)}>
                       <Text style={styles.actionChipText}>Send to Customer</Text>
@@ -333,6 +373,8 @@ const styles = StyleSheet.create({
   actionChip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: BORDER_RADIUS.full, backgroundColor: COLORS.surfaceLight, borderWidth: 1, borderColor: COLORS.border },
   actionGreen: { borderColor: COLORS.success + '44', backgroundColor: COLORS.success + '11' },
   actionRed: { borderColor: COLORS.error + '44', backgroundColor: COLORS.error + '11' },
+  actionBlue: { borderColor: COLORS.primary + '44', backgroundColor: COLORS.primary + '11' },
+  track: { fontSize: 12, color: COLORS.textSecondary, marginTop: 6, fontWeight: '600' },
   actionChipText: { fontSize: 12, fontWeight: '600', color: COLORS.textSecondary },
   empty: { alignItems: 'center', paddingVertical: 60 },
   emptyKicker: { fontSize: 16, fontWeight: '800', color: COLORS.textMuted, marginBottom: SPACING.md },

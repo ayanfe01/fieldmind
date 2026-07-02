@@ -1,10 +1,11 @@
 import React from 'react';
-import { Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { COLORS, SPACING, BORDER_RADIUS } from '../lib/constants';
 import { useAppStore } from '../store/useAppStore';
+import { useThemedAlert } from '../components/ui/ThemedAlertProvider';
 
 const JOBS = {
   sink: {
@@ -41,52 +42,176 @@ const JOBS = {
 
 export default function JobPreviewScreen() {
   const router = useRouter();
-  const { user, isAuthenticated, addClient, addJob } = useAppStore();
+  const { user, isAuthenticated, setActiveRole, addClient, addQuote, startConversation } = useAppStore();
+  const themedAlert = useThemedAlert();
   const params = useLocalSearchParams<{ jobId?: keyof typeof JOBS }>();
   const job = JOBS[params.jobId || 'sink'] || JOBS.sink;
   const jobId = params.jobId || 'sink';
   const nextRoute = `/job-preview?jobId=${jobId}`;
 
-  const lockedAction = () => {
+  const createLeadClient = () => {
+    const clientId = `lead-${jobId}`;
+    addClient({
+      id: clientId,
+      name: job.customer,
+      phone: '',
+      address: job.location,
+      notes: `${job.category} lead. Budget: ${job.budget}.`,
+      createdAt: new Date().toISOString(),
+    });
+    return clientId;
+  };
+
+  const openLeadConversation = (quoteRequested: boolean) => {
+    const conversationId = startConversation({
+      participantId: `customer-${jobId}`,
+      participantName: job.customer,
+      participantRole: 'customer',
+      subject: quoteRequested ? `Quote: ${job.title}` : job.title,
+      quoteRequested,
+    });
+    return conversationId;
+  };
+
+  const performRequestJob = () => {
+    createLeadClient();
+    const conversationId = openLeadConversation(true);
+    router.push({
+      pathname: '/chat/[conversationId]',
+      params: {
+        conversationId,
+        draft: `Hi ${job.customer}, I saw your request for "${job.title}" and I can help. Would you like me to send a quote or discuss the details first?`,
+      },
+    });
+  };
+
+  const requestJob = () => {
     if (isAuthenticated && user?.role === 'tradesperson') {
-      const clientId = `lead-${jobId}`;
-      addClient({
-        id: clientId,
-        name: job.customer,
-        phone: '',
-        address: job.location,
-        notes: `${job.category} lead. Budget: ${job.budget}.`,
-        createdAt: new Date().toISOString(),
-      });
-      addJob({
-        id: '',
-        clientId,
-        title: job.title,
-        description: job.description,
-        scheduledDate: new Date().toISOString().split('T')[0],
-        scheduledTime: job.urgency === 'Today' || job.urgency === 'Ready today' ? 'ASAP' : 'Flexible',
-        estimatedHours: 1,
-        status: 'scheduled',
-        address: job.location,
-        notes: `${job.category} lead accepted. Budget: ${job.budget}.`,
-        createdAt: new Date().toISOString(),
-      });
-      Alert.alert('Job added', 'This request was added to your schedule. Send the customer a quote from your quotes tab.');
-      router.replace('/(tabs)/schedule');
+      performRequestJob();
       return;
     }
     if (isAuthenticated) {
-      Alert.alert('Service pro account required', 'Accepting jobs and sending quotes are provider actions. Create a service pro profile to use these tools.', [
-        { text: 'Create Pro Profile', onPress: () => router.push({ pathname: '/(auth)/signup', params: { role: 'tradesperson', next: nextRoute } }) },
-        { text: 'Continue as Customer', style: 'cancel' },
-      ]);
+      if (user?.roles?.includes('tradesperson')) {
+        themedAlert.show({
+          title: 'Switch to service pro mode?',
+          message: 'Requesting work is a service pro action. Switch modes and continue?',
+          icon: 'briefcase-outline',
+          actions: [
+          {
+            label: 'Switch',
+            icon: 'swap-horizontal',
+            onPress: async () => {
+              await setActiveRole('tradesperson');
+              performRequestJob();
+            },
+          },
+          { label: 'Cancel', variant: 'ghost' },
+          ],
+        });
+        return;
+      }
+      themedAlert.show({
+        title: 'Service pro account required',
+        message: 'Requesting jobs and sending quotes are provider actions. Create a service pro profile to use these tools.',
+        icon: 'briefcase-plus-outline',
+        actions: [
+          { label: 'Create Pro Profile', icon: 'account-plus-outline', onPress: () => router.push({ pathname: '/(auth)/signup', params: { role: 'tradesperson', next: nextRoute } }) },
+          { label: 'Continue as Customer', variant: 'ghost' },
+        ],
+      });
       return;
     }
-    Alert.alert('Service pro account required', 'Create an account or log in to accept this job, message the customer, or send a quote.', [
-      { text: 'Log in', onPress: () => router.push({ pathname: '/(auth)/login', params: { next: nextRoute } }) },
-      { text: 'Sign up', onPress: () => router.push({ pathname: '/(auth)/signup', params: { role: 'tradesperson', next: nextRoute } }) },
-      { text: 'Cancel', style: 'cancel' },
-    ]);
+    themedAlert.show({
+      title: 'Service pro account required',
+      message: 'Create an account or log in to request this job, message the customer, or send a quote.',
+      icon: 'lock-check-outline',
+      actions: [
+        { label: 'Log in', icon: 'login', onPress: () => router.push({ pathname: '/(auth)/login', params: { next: nextRoute } }) },
+        { label: 'Sign up', icon: 'account-plus-outline', onPress: () => router.push({ pathname: '/(auth)/signup', params: { role: 'tradesperson', next: nextRoute } }) },
+        { label: 'Cancel', variant: 'ghost' },
+      ],
+    });
+  };
+
+  const createQuoteDraft = () => {
+    const clientId = createLeadClient();
+    const baseAmount = Number(job.budget.match(/\d+/)?.[0] || 0);
+    addQuote({
+      id: '',
+      clientId,
+      jobDescription: job.description,
+      lineItems: [{
+        id: '1',
+        description: job.title,
+        quantity: 1,
+        unitPrice: baseAmount,
+        total: baseAmount,
+      }],
+      subtotal: baseAmount,
+      tax: 0,
+      total: baseAmount,
+      status: 'draft',
+      notes: `${job.category} quote draft from marketplace lead. Budget: ${job.budget}.`,
+      validUntil: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+      createdAt: new Date().toISOString(),
+    });
+    const conversationId = openLeadConversation(true);
+    themedAlert.show({
+      title: 'Quote draft created',
+      message: 'Review the message before sending it. The job is not yours until the customer accepts.',
+      icon: 'file-document-edit-outline',
+      actions: [
+        {
+          label: 'Review Message',
+          icon: 'message-outline',
+          onPress: () => router.push({
+            pathname: '/chat/[conversationId]',
+            params: {
+              conversationId,
+              draft: `Hi ${job.customer}, I prepared a quote draft for "${job.title}". I can adjust the price after we confirm the details.`,
+            },
+          }),
+        },
+        { label: 'Open Quotes', icon: 'file-document-outline', onPress: () => router.replace('/(tabs)/quotes') },
+        { label: 'Stay here', variant: 'ghost' },
+      ],
+    });
+  };
+
+  const sendQuote = () => {
+    if (isAuthenticated && user?.role === 'tradesperson') {
+      createQuoteDraft();
+      return;
+    }
+    if (isAuthenticated && user?.roles?.includes('tradesperson')) {
+      themedAlert.show({
+        title: 'Switch to service pro mode?',
+        message: 'Sending quotes is a service pro action. Switch modes and continue?',
+        icon: 'briefcase-outline',
+        actions: [
+          {
+            label: 'Switch',
+            icon: 'swap-horizontal',
+            onPress: async () => {
+              await setActiveRole('tradesperson');
+              createQuoteDraft();
+            },
+          },
+          { label: 'Cancel', variant: 'ghost' },
+        ],
+      });
+      return;
+    }
+    themedAlert.show({
+      title: 'Service pro account required',
+      message: 'Create or use a service pro account to send quotes.',
+      icon: 'briefcase-plus-outline',
+      actions: [
+        { label: 'Log in', icon: 'login', onPress: () => router.push({ pathname: '/(auth)/login', params: { next: nextRoute } }) },
+        { label: 'Sign up', icon: 'account-plus-outline', onPress: () => router.push({ pathname: '/(auth)/signup', params: { role: 'tradesperson', next: nextRoute } }) },
+        { label: 'Cancel', variant: 'ghost' },
+      ],
+    });
   };
 
   return (
@@ -152,15 +277,15 @@ export default function JobPreviewScreen() {
         <View style={styles.panel}>
           <Text style={styles.panelTitle}>Why this is locked</Text>
           <Text style={styles.lockCopy}>
-            Accepting a job creates a real customer relationship. FieldMind requires an account so quotes, messages, invoices, and payments stay tied to the right service pro.
+            Requesting a job starts a customer conversation first. The job should only move to your schedule after the customer accepts your quote or gives the work to you.
           </Text>
         </View>
 
         <View style={styles.actionRow}>
-          <TouchableOpacity style={styles.primaryButton} onPress={lockedAction}>
-            <Text style={styles.primaryText}>{isAuthenticated ? 'Accept Job' : 'Sign Up to Accept'}</Text>
+          <TouchableOpacity style={styles.primaryButton} onPress={requestJob}>
+            <Text style={styles.primaryText}>{isAuthenticated ? 'Request Job' : 'Sign Up to Request'}</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.secondaryButton} onPress={lockedAction}>
+          <TouchableOpacity style={styles.secondaryButton} onPress={sendQuote}>
             <Text style={styles.secondaryText}>Send Quote</Text>
           </TouchableOpacity>
         </View>

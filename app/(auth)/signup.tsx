@@ -1,16 +1,19 @@
 import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
-  ScrollView, Alert, ActivityIndicator,
+  ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { COLORS, SPACING, BORDER_RADIUS } from '../../lib/constants';
+import { getEmailValidationMessage, normalizeEmail } from '../../lib/emailValidation';
+import { PASSWORD_RULES, passwordRequirementsMessage } from '../../lib/passwordSecurity';
 import { defaultRouteForRole } from '../../lib/routes';
 import { UserRole, TradeType, PropertyType, PricingMode } from '../../lib/types';
 import { useAppStore } from '../../store/useAppStore';
 import { Button } from '../../components/ui/Button';
+import { useThemedAlert } from '../../components/ui/ThemedAlertProvider';
 
 const SERVICE_CATEGORIES: { value: TradeType; label: string; icon: string }[] = [
   { value: 'plumber', label: 'Plumber', icon: 'pipe' },
@@ -44,6 +47,11 @@ const PROPERTY_TYPES: { value: PropertyType; label: string; icon: string }[] = [
   { value: 'commercial', label: 'Commercial', icon: 'store-outline' },
   { value: 'rental', label: 'Rental Property', icon: 'key-outline' },
 ];
+
+const isExistingAccountMessage = (message?: string) => {
+  const normalized = (message || '').toLowerCase();
+  return normalized.includes('already') || normalized.includes('registered') || normalized.includes('exists');
+};
 
 // ─── Reusable Input ────────────────────────────────────────────────────────────
 function FormInput({
@@ -95,11 +103,15 @@ const progStyles = StyleSheet.create({
 
 export default function SignupScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ role: UserRole; next?: string }>();
+  const params = useLocalSearchParams<{ role: UserRole | 'freelancer'; next?: string }>();
+  const isFreelancer = params.role === 'freelancer';
   const role: UserRole = params.role === 'tradesperson' ? 'tradesperson' : 'customer';
   const nextRoute = typeof params.next === 'string' ? params.next : undefined;
   const registerUser = useAppStore(s => s.registerUser);
   const signInWithGoogle = useAppStore(s => s.signInWithGoogle);
+  const addAccountRole = useAppStore(s => s.addAccountRole);
+  const resendEmailConfirmation = useAppStore(s => s.resendEmailConfirmation);
+  const themedAlert = useThemedAlert();
 
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
@@ -109,11 +121,16 @@ export default function SignupScreen() {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [passwordHelpVisible, setPasswordHelpVisible] = useState(false);
   const [phone, setPhone] = useState('');
 
   // Tradesperson fields
   const [businessName, setBusinessName] = useState('');
-  const [selectedTrade, setSelectedTrade] = useState<TradeType | null>(null);
+  const [selectedTrades, setSelectedTrades] = useState<TradeType[]>([]);
+  const [customTrade, setCustomTrade] = useState('');
   const [pricingMode, setPricingMode] = useState<PricingMode>('quote');
   const [hourlyRate, setHourlyRate] = useState('');
   const [fixedRate, setFixedRate] = useState('');
@@ -126,92 +143,182 @@ export default function SignupScreen() {
   const [propertyAddress, setPropertyAddress] = useState('');
   const [selectedPropertyType, setSelectedPropertyType] = useState<PropertyType | null>(null);
 
-  const totalSteps = role === 'tradesperson' ? 4 : 3;
+  const totalSteps = isFreelancer ? 2 : role === 'tradesperson' ? 4 : 3;
   const isTrade = role === 'tradesperson';
+  const hasServiceProfile = isTrade || isFreelancer;
+  const accountRoles: UserRole[] = isFreelancer ? ['customer', 'tradesperson'] : [role];
+  const passwordIssues = passwordRequirementsMessage(password);
+  const passwordsMatch = !!password && !!confirmPassword && password === confirmPassword;
+  const passwordMeetsRequirements = !passwordIssues && passwordsMatch;
+  const shouldShowPasswordHelp = passwordHelpVisible && !passwordMeetsRequirements;
 
   const handleNext = () => {
     // Validate current step
     if (step === 1 && (!name || !email || !password)) {
-      Alert.alert('Required fields', 'Please fill in all fields to continue.'); return;
+      themedAlert.show({ title: 'Required fields', message: 'Please fill in all fields to continue.', icon: 'form-textbox' }); return;
     }
-    if (step === 1 && password.length < 6) {
-      Alert.alert('Weak password', 'Password must be at least 6 characters.'); return;
+    const emailIssue = step === 1 ? getEmailValidationMessage(email) : '';
+    if (emailIssue) {
+      themedAlert.show({ title: 'Check email address', message: emailIssue, icon: 'email-alert-outline' }); return;
     }
-    if (step === 2 && !phone) {
-      Alert.alert('Required', 'Please enter your phone number.'); return;
+    if (step === 1 && passwordIssues) {
+      themedAlert.show({ title: 'Weak password', message: passwordIssues, icon: 'lock-alert-outline' }); return;
     }
-    if (step === 2 && isTrade && !businessName) {
-      Alert.alert('Required', 'Please enter your business name.'); return;
+    if (step === 1 && password !== confirmPassword) {
+      themedAlert.show({ title: 'Passwords do not match', message: 'Enter the same password twice before continuing.', icon: 'lock-check-outline' }); return;
     }
-    if (step === 3 && isTrade && !selectedTrade) {
-      Alert.alert('Required', 'Please select your service category.'); return;
+    if (step === 3 && isTrade && selectedTrades.length === 0 && !customTrade.trim()) {
+      themedAlert.show({ title: 'Required', message: 'Select at least one service category or type what you do.', icon: 'briefcase-search-outline' }); return;
     }
-    if (step === 3 && !isTrade && !selectedPropertyType) {
-      Alert.alert('Required', 'Please select your property type.'); return;
+    if (step === 3 && !isTrade && !isFreelancer && !selectedPropertyType) {
+      themedAlert.show({ title: 'Required', message: 'Please select your property type.', icon: 'home-alert-outline' }); return;
     }
     setStep(s => s + 1);
   };
 
   const handleSubmit = async () => {
     setLoading(true);
+    const normalizedEmail = normalizeEmail(email);
+    const emailIssue = getEmailValidationMessage(normalizedEmail);
+    if (emailIssue) {
+      setLoading(false);
+      themedAlert.show({ title: 'Check email address', message: emailIssue, icon: 'email-alert-outline' });
+      return;
+    }
+    const submitPasswordIssues = passwordRequirementsMessage(password);
+    if (submitPasswordIssues) {
+      setLoading(false);
+      themedAlert.show({ title: 'Weak password', message: submitPasswordIssues, icon: 'lock-alert-outline' });
+      return;
+    }
+    if (password !== confirmPassword) {
+      setLoading(false);
+      themedAlert.show({ title: 'Passwords do not match', message: 'Enter the same password twice before creating your account.', icon: 'lock-check-outline' });
+      return;
+    }
 
     const result = await registerUser({
       id: Math.random().toString(36).substr(2, 9),
       role,
-      name, email, phone,
+      roles: accountRoles,
+      name, email: normalizedEmail, phone: phone.trim(),
       createdAt: new Date().toISOString(),
-      ...(isTrade ? {
-        businessName, trade: selectedTrade || 'general',
+      ...(hasServiceProfile ? {
+        businessName,
+        trade: selectedTrades[0] || 'general',
+        trades: selectedTrades.length ? selectedTrades : ['general'],
+        customTrade: customTrade.trim() || undefined,
         pricingMode,
         hourlyRate: pricingMode === 'hourly' ? parseFloat(hourlyRate) || undefined : undefined,
         fixedRate: pricingMode === 'fixed' ? parseFloat(fixedRate) || undefined : undefined,
         yearsExperience: parseInt(yearsExp) || 1,
         serviceArea, licenseNumber, bio,
-      } : {
+      } : isFreelancer ? {} : {
         propertyAddress,
         propertyType: selectedPropertyType || 'home',
       }),
     }, password);
     setLoading(false);
     if (!result.success) {
-      Alert.alert('Account already exists', result.message || 'Try logging in instead.');
+      const existingAccount = isExistingAccountMessage(result.message);
+      const targetEmail = normalizedEmail;
+      themedAlert.show({
+        title: existingAccount ? 'Account already exists' : 'Could not create account',
+        message: existingAccount
+          ? `There is already an account linked to ${targetEmail}. Log in instead.`
+          : result.message || 'Unable to create this account right now.',
+        icon: existingAccount ? 'account-check-outline' : 'account-alert-outline',
+        actions: existingAccount ? [
+          {
+            label: 'Log in',
+            icon: 'login',
+            onPress: () => router.replace({ pathname: '/(auth)/login', params: { email: targetEmail } }),
+          },
+          { label: 'Close', variant: 'ghost' },
+        ] : undefined,
+      });
       return;
     }
     if (result.requiresEmailConfirmation) {
-      Alert.alert('Confirm your email', result.message || 'Check your email, then log in.');
-      router.replace('/(auth)/login');
+      showConfirmEmailDialog(normalizedEmail, result.message);
       return;
     }
     router.replace((nextRoute || defaultRouteForRole(result.user?.role)) as any);
   };
 
+  const showConfirmEmailDialog = (targetEmail: string, message?: string) => {
+    themedAlert.show({
+      title: 'Confirm your email',
+      message: message || `We sent a confirmation link to ${targetEmail}. Check spam or junk if it is not in your inbox.`,
+      icon: 'email-check-outline',
+      dismissible: false,
+      actions: [
+        {
+          label: 'Resend Email',
+          icon: 'email-sync-outline',
+          onPress: async () => {
+            const result = await resendEmailConfirmation(targetEmail);
+            themedAlert.show({
+              title: result.success ? 'Email sent' : 'Email not sent',
+              message: result.message || (result.success
+                ? `We sent another confirmation link to ${targetEmail}.`
+                : 'Unable to resend the confirmation email right now.'),
+              icon: result.success ? 'email-fast-outline' : 'email-alert-outline',
+              actions: [
+                { label: 'Log in', icon: 'login', onPress: () => router.replace('/(auth)/login') },
+                { label: 'Close', variant: 'ghost' },
+              ],
+            });
+          },
+        },
+        { label: 'Log in', icon: 'login', onPress: () => router.replace('/(auth)/login') },
+      ],
+    });
+  };
+
   const handleGoogleSignup = async () => {
     setGoogleLoading(true);
     const result = await signInWithGoogle(role);
+    if (result.success && result.user && isFreelancer) {
+      await addAccountRole('tradesperson');
+    }
     setGoogleLoading(false);
 
     if (!result.success || !result.user) {
-      Alert.alert('Google signup failed', result.message || 'Unable to continue with Google.');
+      themedAlert.show({
+        title: 'Google signup failed',
+        message: result.message || 'Unable to continue with Google.',
+        icon: 'google',
+      });
       return;
     }
 
     router.replace((nextRoute || defaultRouteForRole(result.user.role)) as any);
   };
 
+  const toggleTrade = (trade: TradeType) => {
+    setSelectedTrades(current => (
+      current.includes(trade)
+        ? current.filter(item => item !== trade)
+        : [...current, trade]
+    ));
+  };
+
   const RoleTag = () => (
-    <View style={[styles.roleTag, isTrade ? styles.roleTagTrade : styles.roleTagCustomer]}>
+    <View style={[styles.roleTag, isTrade || isFreelancer ? styles.roleTagTrade : styles.roleTagCustomer]}>
       <MaterialCommunityIcons
-        name={isTrade ? 'briefcase-outline' : 'home-account'}
-        size={13} color={isTrade ? COLORS.primary : '#7EA7D8'}
+        name={isFreelancer ? 'account-switch-outline' : isTrade ? 'briefcase-outline' : 'home-account'}
+        size={13} color={isTrade || isFreelancer ? COLORS.primary : '#7EA7D8'}
       />
-      <Text style={[styles.roleTagText, { color: isTrade ? COLORS.primary : '#7EA7D8' }]}>
-        {isTrade ? 'Service Pro' : 'Customer'}
+      <Text style={[styles.roleTagText, { color: isTrade || isFreelancer ? COLORS.primary : '#7EA7D8' }]}>
+        {isFreelancer ? 'Freelancer' : isTrade ? 'Service Pro' : 'Customer'}
       </Text>
     </View>
   );
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
+      <KeyboardAvoidingView style={styles.keyboard} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.scrollContent}
@@ -250,25 +357,156 @@ export default function SignupScreen() {
             </View>
             <FormInput label="Full name" value={name} onChangeText={setName} placeholder="John Smith" icon="account-outline" />
             <FormInput label="Email address" value={email} onChangeText={setEmail} placeholder="you@example.com" icon="email-outline" keyboardType="email-address" />
-            <FormInput label="Password" value={password} onChangeText={setPassword} placeholder="Min. 6 characters" icon="lock-outline" secureTextEntry />
+            <View style={inputStyles.field}>
+              <Text style={inputStyles.label}>Password</Text>
+              <View style={inputStyles.row}>
+                <MaterialCommunityIcons name="lock-outline" size={20} color={COLORS.textMuted} />
+                <TextInput
+                  style={inputStyles.input}
+                  placeholder="8+ chars, number, symbol"
+                  placeholderTextColor={COLORS.textMuted}
+                  value={password}
+                  onChangeText={setPassword}
+                  secureTextEntry={!showPassword}
+                  autoCapitalize="none"
+                  onFocus={() => setPasswordHelpVisible(true)}
+                  onBlur={() => setPasswordHelpVisible(false)}
+                />
+                <TouchableOpacity onPress={() => setShowPassword(value => !value)}>
+                  <MaterialCommunityIcons name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color={COLORS.textMuted} />
+                </TouchableOpacity>
+              </View>
+            </View>
+            <View style={inputStyles.field}>
+              <Text style={inputStyles.label}>Confirm password</Text>
+              <View style={inputStyles.row}>
+                <MaterialCommunityIcons name="lock-check-outline" size={20} color={COLORS.textMuted} />
+                <TextInput
+                  style={inputStyles.input}
+                  placeholder="Type password again"
+                  placeholderTextColor={COLORS.textMuted}
+                  value={confirmPassword}
+                  onChangeText={setConfirmPassword}
+                  secureTextEntry={!showConfirmPassword}
+                  autoCapitalize="none"
+                  onFocus={() => setPasswordHelpVisible(true)}
+                  onBlur={() => setPasswordHelpVisible(false)}
+                />
+                <TouchableOpacity onPress={() => setShowConfirmPassword(value => !value)}>
+                  <MaterialCommunityIcons name={showConfirmPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color={COLORS.textMuted} />
+                </TouchableOpacity>
+              </View>
+            </View>
+            {shouldShowPasswordHelp && (
+              <View style={styles.passwordChecklist}>
+                {PASSWORD_RULES.map(rule => {
+                  const passed = rule.test(password);
+                  return (
+                    <View key={rule.id} style={styles.passwordRule}>
+                      <MaterialCommunityIcons
+                        name={passed ? 'check-circle-outline' : 'circle-outline'}
+                        size={15}
+                        color={passed ? COLORS.success : COLORS.textMuted}
+                      />
+                      <Text style={[styles.passwordRuleText, passed && styles.passwordRuleTextPassed]}>
+                        {rule.label}
+                      </Text>
+                    </View>
+                  );
+                })}
+                <View style={styles.passwordRule}>
+                  <MaterialCommunityIcons
+                    name={passwordsMatch ? 'check-circle-outline' : 'circle-outline'}
+                    size={15}
+                    color={passwordsMatch ? COLORS.success : COLORS.textMuted}
+                  />
+                  <Text style={[
+                    styles.passwordRuleText,
+                    passwordsMatch && styles.passwordRuleTextPassed,
+                  ]}>
+                    Passwords match
+                  </Text>
+                </View>
+              </View>
+            )}
           </View>
         )}
 
         {/* ── STEP 2: Contact + Business ── */}
         {step === 2 && (
           <View>
-            <Text style={styles.stepTitle}>{isTrade ? 'Your service business' : 'Contact details'}</Text>
-            <Text style={styles.stepSub}>{isTrade ? 'Tell customers what you offer and how you charge' : 'How can we reach you?'}</Text>
-            <FormInput label="Phone number" value={phone} onChangeText={setPhone} placeholder="+1 555 000 0000" icon="phone-outline" keyboardType="phone-pad" />
-            {isTrade && (
+            <Text style={styles.stepTitle}>{hasServiceProfile ? 'Your service profile' : 'Contact details'}</Text>
+            <Text style={styles.stepSub}>
+              {isFreelancer
+                ? 'Add what you offer now, or keep it broad and refine it later.'
+                : isTrade
+                ? 'Tell customers what you offer and how you charge'
+                : 'Add these now or complete them later.'}
+            </Text>
+            <FormInput label="Phone number (optional)" value={phone} onChangeText={setPhone} placeholder="Add later or enter now" icon="phone-outline" keyboardType="phone-pad" />
+            {hasServiceProfile && (
               <>
-                <FormInput label="Business or display name" value={businessName} onChangeText={setBusinessName} placeholder="Amina Hair Studio" icon="store-outline" />
-                <FormInput label="Service area" value={serviceArea} onChangeText={setServiceArea} placeholder="e.g. New York, NY" icon="map-marker-outline" />
-                <FormInput label="Years of experience" value={yearsExp} onChangeText={setYearsExp} placeholder="5" icon="clock-outline" keyboardType="numeric" />
+                <FormInput label="Business or display name (optional)" value={businessName} onChangeText={setBusinessName} placeholder="Amina Hair Studio" icon="store-outline" />
+                <FormInput label="Service area (optional)" value={serviceArea} onChangeText={setServiceArea} placeholder="e.g. New York, NY" icon="map-marker-outline" />
+                <FormInput label="Years of experience (optional)" value={yearsExp} onChangeText={setYearsExp} placeholder="5" icon="clock-outline" keyboardType="numeric" />
               </>
             )}
-            {!isTrade && (
-              <FormInput label="Property address" value={propertyAddress} onChangeText={setPropertyAddress} placeholder="123 Main St, City, State" icon="home-outline" />
+            {isFreelancer && (
+              <>
+                <Text style={styles.sectionLabel}>Services you can offer</Text>
+                <View style={styles.compactGrid}>
+                  {SERVICE_CATEGORIES.map(t => (
+                    <TouchableOpacity
+                      key={t.value}
+                      style={[styles.compactChip, selectedTrades.includes(t.value) && styles.compactChipActive]}
+                      onPress={() => toggleTrade(t.value)}
+                      activeOpacity={0.8}
+                    >
+                      <MaterialCommunityIcons
+                        name={t.icon as any}
+                        size={16}
+                        color={selectedTrades.includes(t.value) ? COLORS.primary : COLORS.textSecondary}
+                      />
+                      <Text style={[styles.compactChipText, selectedTrades.includes(t.value) && { color: COLORS.primary }]}>
+                        {t.label}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                <FormInput
+                  label="Something else you do (optional)"
+                  value={customTrade}
+                  onChangeText={setCustomTrade}
+                  placeholder="e.g. Nail tech, event decorator, tutor"
+                  icon="briefcase-edit-outline"
+                />
+                <Text style={styles.sectionLabel}>How do you usually charge?</Text>
+                <View style={styles.pricingStack}>
+                  {PRICING_MODES.map(mode => (
+                    <TouchableOpacity
+                      key={mode.value}
+                      style={[styles.pricingCard, pricingMode === mode.value && styles.pricingCardActive]}
+                      onPress={() => setPricingMode(mode.value)}
+                      activeOpacity={0.84}
+                    >
+                      <View style={[styles.radio, pricingMode === mode.value && styles.radioActive]} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.pricingTitle}>{mode.label}</Text>
+                        <Text style={styles.pricingHelper}>{mode.helper}</Text>
+                      </View>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                {pricingMode === 'hourly' && (
+                  <FormInput label="Hourly rate ($)" value={hourlyRate} onChangeText={setHourlyRate} placeholder="85" icon="cash-multiple" keyboardType="numeric" />
+                )}
+                {pricingMode === 'fixed' && (
+                  <FormInput label="Starting price ($)" value={fixedRate} onChangeText={setFixedRate} placeholder="120" icon="cash-multiple" keyboardType="numeric" />
+                )}
+              </>
+            )}
+            {!isTrade && !isFreelancer && (
+              <FormInput label="Property address (optional)" value={propertyAddress} onChangeText={setPropertyAddress} placeholder="123 Main St, City, State" icon="home-outline" />
             )}
           </View>
         )}
@@ -277,25 +515,35 @@ export default function SignupScreen() {
         {step === 3 && isTrade && (
           <View>
             <Text style={styles.stepTitle}>Your service</Text>
-            <Text style={styles.stepSub}>Pick the category clients should find you under</Text>
+            <Text style={styles.stepSub}>Pick every category that fits. You can also type your own.</Text>
             <View style={styles.grid}>
               {SERVICE_CATEGORIES.map(t => (
                 <TouchableOpacity
                   key={t.value}
-                  style={[styles.gridCard, selectedTrade === t.value && styles.gridCardActive]}
-                  onPress={() => setSelectedTrade(t.value)}
+                  style={[styles.gridCard, selectedTrades.includes(t.value) && styles.gridCardActive]}
+                  onPress={() => toggleTrade(t.value)}
                   activeOpacity={0.8}
                 >
                   <MaterialCommunityIcons
                     name={t.icon as any} size={26}
-                    color={selectedTrade === t.value ? COLORS.primary : COLORS.textSecondary}
+                    color={selectedTrades.includes(t.value) ? COLORS.primary : COLORS.textSecondary}
                   />
-                  <Text style={[styles.gridLabel, selectedTrade === t.value && { color: COLORS.primary }]}>
+                  <Text style={[styles.gridLabel, selectedTrades.includes(t.value) && { color: COLORS.primary }]}>
                     {t.label}
                   </Text>
+                  {selectedTrades.includes(t.value) && (
+                    <MaterialCommunityIcons name="check-circle" size={17} color={COLORS.primary} style={styles.gridCheck} />
+                  )}
                 </TouchableOpacity>
               ))}
             </View>
+            <FormInput
+              label="What do you do? (optional)"
+              value={customTrade}
+              onChangeText={setCustomTrade}
+              placeholder="e.g. Nail tech, event decorator, tutor"
+              icon="briefcase-edit-outline"
+            />
             <Text style={styles.sectionLabel}>How do you charge?</Text>
             <View style={styles.pricingStack}>
               {PRICING_MODES.map(mode => (
@@ -314,15 +562,15 @@ export default function SignupScreen() {
               ))}
             </View>
             {pricingMode === 'hourly' && (
-              <FormInput label="Hourly rate ($)" value={hourlyRate} onChangeText={setHourlyRate} placeholder="85" icon="cash-outline" keyboardType="numeric" />
+              <FormInput label="Hourly rate ($)" value={hourlyRate} onChangeText={setHourlyRate} placeholder="85" icon="cash-multiple" keyboardType="numeric" />
             )}
             {pricingMode === 'fixed' && (
-              <FormInput label="Starting price ($)" value={fixedRate} onChangeText={setFixedRate} placeholder="120" icon="cash-outline" keyboardType="numeric" />
+              <FormInput label="Starting price ($)" value={fixedRate} onChangeText={setFixedRate} placeholder="120" icon="cash-multiple" keyboardType="numeric" />
             )}
           </View>
         )}
 
-        {step === 3 && !isTrade && (
+        {step === 3 && !isTrade && !isFreelancer && (
           <View>
             <Text style={styles.stepTitle}>Your property</Text>
             <Text style={styles.stepSub}>What type of property do you have?</Text>
@@ -385,7 +633,7 @@ export default function SignupScreen() {
             <Button title="Continue" onPress={handleNext} style={{ flex: 1 }} />
           ) : (
             <Button
-              title={isTrade ? 'Create Service Pro Account' : 'Create Customer Account'}
+              title={isFreelancer ? 'Create Freelancer Account' : isTrade ? 'Create Service Pro Account' : 'Create Customer Account'}
               onPress={handleSubmit}
               loading={loading}
               style={{ flex: 1 }}
@@ -403,14 +651,16 @@ export default function SignupScreen() {
 
         <View style={{ height: SPACING.xxl }} />
       </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: COLORS.background },
+  keyboard: { flex: 1 },
   scroll: { flex: 1 },
-  scrollContent: { paddingHorizontal: SPACING.lg, paddingTop: SPACING.lg, paddingBottom: SPACING.xxl },
+  scrollContent: { paddingHorizontal: SPACING.lg, paddingTop: SPACING.lg, paddingBottom: 140 },
   topRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: SPACING.lg },
   roleTag: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 12, paddingVertical: 6, borderRadius: BORDER_RADIUS.full, borderWidth: 1 },
   roleTagTrade: { backgroundColor: COLORS.primary + '15', borderColor: COLORS.primary + '40' },
@@ -439,9 +689,25 @@ const styles = StyleSheet.create({
     width: '47%', backgroundColor: COLORS.surface, borderRadius: BORDER_RADIUS.lg,
     padding: SPACING.md, alignItems: 'center', gap: SPACING.sm,
     borderWidth: 1, borderColor: COLORS.border,
+    position: 'relative',
   },
   gridCardActive: { borderColor: COLORS.primary, backgroundColor: COLORS.primary + '0D' },
+  gridCheck: { position: 'absolute', top: 8, right: 8 },
   gridLabel: { fontSize: 12, fontWeight: '700', color: COLORS.textSecondary, textAlign: 'center' },
+  compactGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.sm, marginBottom: SPACING.md },
+  compactChip: {
+    minHeight: 40,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 11,
+    borderRadius: BORDER_RADIUS.full,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  compactChipActive: { borderColor: COLORS.primary, backgroundColor: COLORS.primary + '10' },
+  compactChipText: { fontSize: 12, fontWeight: '800', color: COLORS.textSecondary },
   sectionLabel: { fontSize: 14, fontWeight: '900', color: COLORS.text, marginBottom: SPACING.sm },
   pricingStack: { gap: SPACING.sm, marginBottom: SPACING.md },
   pricingCard: {
@@ -459,6 +725,29 @@ const styles = StyleSheet.create({
   radioActive: { borderColor: COLORS.primary, backgroundColor: COLORS.primary },
   pricingTitle: { fontSize: 14, color: COLORS.text, fontWeight: '900', marginBottom: 3 },
   pricingHelper: { fontSize: 12, color: COLORS.textMuted, lineHeight: 17 },
+  passwordChecklist: {
+    gap: 7,
+    marginTop: -SPACING.sm,
+    marginBottom: SPACING.md,
+    padding: SPACING.md,
+    borderRadius: BORDER_RADIUS.md,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  passwordRule: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+  },
+  passwordRuleText: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    fontWeight: '700',
+  },
+  passwordRuleTextPassed: {
+    color: COLORS.success,
+  },
   verifyBox: {
     flexDirection: 'row', alignItems: 'flex-start', gap: SPACING.md,
     backgroundColor: COLORS.success + '10', borderRadius: BORDER_RADIUS.lg,

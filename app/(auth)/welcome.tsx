@@ -6,26 +6,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { COLORS, SPACING, BORDER_RADIUS } from '../../lib/constants';
+import { MARKETPLACE_PRO_LIST } from '../../lib/marketplacePros';
+import { SERVICE_CATEGORY_OPTIONS } from '../../lib/serviceCategories';
 import { UserRole } from '../../lib/types';
 
 type AudienceMode = 'customer' | 'tradesperson';
-
-const categories = [
-  { icon: 'pipe-wrench', label: 'Plumbing' },
-  { icon: 'lightning-bolt-outline', label: 'Electrical' },
-  { icon: 'content-cut', label: 'Hair' },
-  { icon: 'tape-measure', label: 'Tailoring' },
-  { icon: 'shoe-formal', label: 'Shoes' },
-  { icon: 'spray-bottle', label: 'Cleaning' },
-  { icon: 'hammer-screwdriver', label: 'Repairs' },
-] as const;
-
-const pros = [
-  { id: 'ayanfe', name: 'Ayanfe Buildings', trade: 'Engineer', rating: '4.9', jobs: '126 jobs', price: 'Quote or hourly', badge: 'Verified' },
-  { id: 'hair', name: 'Amina Hair Studio', trade: 'Hairstylist', rating: '4.9', jobs: '141 bookings', price: 'From $80/session', badge: 'Fast reply' },
-  { id: 'tailor', name: 'Precision Tailoring', trade: 'Tailor', rating: '4.8', jobs: '64 jobs', price: 'Quote first', badge: 'Available' },
-  { id: 'plumbing', name: 'Northside Plumbing', trade: 'Plumber', rating: '4.8', jobs: '89 jobs', price: '$85/hr', badge: 'Fast reply' },
-] as const;
 
 const openJobs = [
   { id: 'sink', title: 'Kitchen sink leaking', location: 'Moncton, NB', budget: '$300-$450', status: 'Quote needed' },
@@ -39,6 +24,9 @@ const stats = [
   { label: 'Avg. response', value: '18m' },
 ] as const;
 
+const compactCategories = SERVICE_CATEGORY_OPTIONS.slice(0, 6);
+const previewPros = MARKETPLACE_PRO_LIST.slice(0, 4);
+
 export default function WelcomeScreen() {
   const router = useRouter();
   const [mode, setMode] = useState<AudienceMode>('customer');
@@ -50,6 +38,13 @@ export default function WelcomeScreen() {
 
   const openPostJob = (category?: string) => {
     router.push({ pathname: '/post-job', params: category ? { category } : undefined });
+  };
+  const submitSearch = () => {
+    if (mode === 'customer') {
+      openPostJob(query.trim() || undefined);
+      return;
+    }
+    startSignup('tradesperson');
   };
 
   return (
@@ -81,7 +76,12 @@ export default function WelcomeScreen() {
               placeholderTextColor={COLORS.textMuted}
               value={query}
               onChangeText={setQuery}
+              returnKeyType="search"
+              onSubmitEditing={submitSearch}
             />
+            <TouchableOpacity style={styles.searchAction} onPress={submitSearch}>
+              <MaterialCommunityIcons name="arrow-right" size={18} color="#071210" />
+            </TouchableOpacity>
           </View>
 
           <View style={styles.segment}>
@@ -103,9 +103,9 @@ export default function WelcomeScreen() {
         </View>
 
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.categoryRow}>
-          {categories.map(category => (
-            <TouchableOpacity key={category.label} style={styles.categoryCard} activeOpacity={0.84} onPress={() => openPostJob(category.label)}>
-              <MaterialCommunityIcons name={category.icon} size={24} color={COLORS.primary} />
+          {compactCategories.map(category => (
+            <TouchableOpacity key={category.value} style={styles.categoryCard} activeOpacity={0.84} onPress={() => openPostJob(category.label)}>
+              <MaterialCommunityIcons name={category.icon as any} size={24} color={COLORS.primary} />
               <Text style={styles.categoryText}>{category.label}</Text>
             </TouchableOpacity>
           ))}
@@ -124,12 +124,12 @@ export default function WelcomeScreen() {
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionTitle}>Top service pros nearby</Text>
-              <TouchableOpacity onPress={() => openPostJob()}>
+              <TouchableOpacity onPress={() => router.push('/find-pro')}>
                 <Text style={styles.sectionAction}>See all</Text>
               </TouchableOpacity>
             </View>
 
-            {pros.map(pro => (
+            {previewPros.map(pro => (
               <TouchableOpacity
                 key={pro.name}
                 style={styles.proCard}
@@ -146,7 +146,7 @@ export default function WelcomeScreen() {
                       <Text style={styles.badgeText}>{pro.badge}</Text>
                     </View>
                   </View>
-                  <Text style={styles.proMeta}>{pro.trade} · {pro.jobs}</Text>
+                  <Text style={styles.proMeta}>{pro.trade} - {pro.jobs}</Text>
                   <View style={styles.ratingRow}>
                     <MaterialCommunityIcons name="star" size={14} color={COLORS.warning} />
                     <Text style={styles.ratingText}>{pro.rating}</Text>
@@ -258,6 +258,7 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
   },
   searchInput: { flex: 1, color: COLORS.text, fontSize: 14, paddingVertical: 10 },
+  searchAction: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.primary },
   segment: {
     flexDirection: 'row',
     padding: 4,

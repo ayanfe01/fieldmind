@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Image, Alert, ScrollView } from 'react-native';
+import React from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, Image, ScrollView } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { COLORS, SPACING, BORDER_RADIUS } from '../../lib/constants';
 import { MediaItem } from '../../lib/types';
+import { useThemedAlert } from './ThemedAlertProvider';
 
 interface MediaUploaderProps {
   media: MediaItem[];
@@ -15,19 +16,32 @@ interface MediaUploaderProps {
 }
 
 export function MediaUploader({ media, onAdd, onRemove, label = 'Photos & Videos', hint = 'Help the service pro understand the job', maxItems = 6 }: MediaUploaderProps) {
+  const themedAlert = useThemedAlert();
 
   const pickMedia = () => {
-    Alert.alert('Add Media', 'Choose an option', [
-      { text: 'Take Photo', onPress: () => launchCamera() },
-      { text: 'Photo Library', onPress: () => launchLibrary('Images') },
-      { text: 'Video Library', onPress: () => launchLibrary('Videos') },
-      { text: 'Cancel', style: 'cancel' },
-    ]);
+    themedAlert.show({
+      title: 'Add Media',
+      message: 'Attach photos or videos so the quote has better context.',
+      icon: 'camera-plus-outline',
+      actions: [
+        { label: 'Take Photo', icon: 'camera-outline', onPress: () => launchCamera() },
+        { label: 'Photo Library', icon: 'image-multiple-outline', onPress: () => launchLibrary('Images') },
+        { label: 'Video Library', icon: 'video-outline', onPress: () => launchLibrary('Videos') },
+        { label: 'Cancel', variant: 'ghost' },
+      ],
+    });
   };
 
   const launchCamera = async () => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
-    if (status !== 'granted') { Alert.alert('Permission needed', 'Camera access required.'); return; }
+    if (status !== 'granted') {
+      themedAlert.show({
+        title: 'Permission needed',
+        message: 'Camera access is required to take a photo.',
+        icon: 'camera-lock-outline',
+      });
+      return;
+    }
     const result = await ImagePicker.launchCameraAsync({ quality: 0.8 });
     if (!result.canceled && result.assets[0]) {
       addItem(result.assets[0].uri, 'image');
@@ -36,9 +50,16 @@ export function MediaUploader({ media, onAdd, onRemove, label = 'Photos & Videos
 
   const launchLibrary = async (type: 'Images' | 'Videos') => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') { Alert.alert('Permission needed', 'Library access required.'); return; }
+    if (status !== 'granted') {
+      themedAlert.show({
+        title: 'Permission needed',
+        message: 'Library access is required to attach media.',
+        icon: 'image-lock-outline',
+      });
+      return;
+    }
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: type === 'Images' ? ImagePicker.MediaTypeOptions.Images : ImagePicker.MediaTypeOptions.Videos,
+      mediaTypes: type === 'Images' ? ['images'] : ['videos'],
       quality: 0.8, allowsMultipleSelection: true, selectionLimit: maxItems - media.length,
     });
     if (!result.canceled) {

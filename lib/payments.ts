@@ -1,8 +1,4 @@
-// Payment utilities for FieldMind
-// Handles Stripe payment intent creation via direct API calls
-
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
-const STRIPE_API = 'https://api.stripe.com/v1';
+import { supabase } from './supabase';
 
 export type PaymentTerms = 'full_after' | 'split_50_50' | 'full_upfront' | 'custom';
 
@@ -10,7 +6,7 @@ export interface PaymentTermsConfig {
   type: PaymentTerms;
   label: string;
   description: string;
-  depositPercent: number; // 0 = nothing upfront, 100 = full upfront
+  depositPercent: number;
 }
 
 export const PAYMENT_TERMS: PaymentTermsConfig[] = [
@@ -63,53 +59,72 @@ export function calculatePaymentSplit(
   };
 }
 
-// Create a Stripe Payment Intent via fetch (works in React Native)
+// Detect the device's currency from its locale region.
+// Falls back to USD if detection is unavailable.
+const REGION_TO_CURRENCY: Record<string, string> = {
+  CA: 'CAD', US: 'USD', GB: 'GBP', AU: 'AUD', NZ: 'NZD',
+  DE: 'EUR', FR: 'EUR', ES: 'EUR', IT: 'EUR', NL: 'EUR',
+  BE: 'EUR', PT: 'EUR', AT: 'EUR', IE: 'EUR', FI: 'EUR',
+  GR: 'EUR', LU: 'EUR', SK: 'EUR', SI: 'EUR', EE: 'EUR',
+  LV: 'EUR', LT: 'EUR', CY: 'EUR', MT: 'EUR',
+  CH: 'CHF', SE: 'SEK', NO: 'NOK', DK: 'DKK',
+  PL: 'PLN', CZ: 'CZK', HU: 'HUF', RO: 'RON',
+  JP: 'JPY', CN: 'CNY', IN: 'INR', SG: 'SGD', HK: 'HKD',
+  KR: 'KRW', TH: 'THB', MY: 'MYR', PH: 'PHP', ID: 'IDR',
+  MX: 'MXN', BR: 'BRL', AR: 'ARS', CL: 'CLP', CO: 'COP',
+  ZA: 'ZAR', NG: 'NGN', GH: 'GHS', KE: 'KES', TZ: 'TZS',
+  EG: 'EGP', MA: 'MAD', AE: 'AED', SA: 'SAR', TR: 'TRY',
+  IL: 'ILS', RU: 'RUB', UA: 'UAH',
+};
+
+export function getDeviceCurrency(): string {
+  try {
+    const locale = Intl.NumberFormat().resolvedOptions().locale || '';
+    const parts = locale.split('-');
+    // Locale can be 'en-CA', 'fr-CA', 'zh-Hant-HK' etc.
+    const region = parts[parts.length - 1].toUpperCase();
+    return REGION_TO_CURRENCY[region] || 'USD';
+  } catch {
+    return 'USD';
+  }
+}
+
 export async function createPaymentIntent(
   amountInCents: number,
-  currency: string = 'usd',
+  currency: string,
   description: string,
   metadata: Record<string, string> = {}
 ): Promise<{ clientSecret: string; paymentIntentId: string }> {
-  const params = new URLSearchParams();
-  params.append('amount', String(amountInCents));
-  params.append('currency', currency);
-  params.append('description', description);
-  params.append('payment_method_types[]', 'card');
-  Object.entries(metadata).forEach(([k, v]) => {
-    params.append(`metadata[${k}]`, v);
+  const { data, error } = await supabase.functions.invoke('create-payment-intent', {
+    body: { amountInCents, currency: currency.toLowerCase(), description, metadata },
   });
 
-  const response = await fetch(`${STRIPE_API}/payment_intents`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${STRIPE_SECRET_KEY}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: params.toString(),
-  });
-
-  if (!response.ok) {
-    const err = await response.json();
-    throw new Error(err.error?.message || 'Failed to create payment intent');
+  if (error) {
+    throw new Error(error.message || 'Failed to create payment intent');
   }
 
-  const data = await response.json();
+  if (!data?.clientSecret || !data?.paymentIntentId) {
+    throw new Error('Payment service returned an invalid response');
+  }
+
   return {
-    clientSecret: data.client_secret,
-    paymentIntentId: data.id,
+    clientSecret: data.clientSecret,
+    paymentIntentId: data.paymentIntentId,
   };
 }
 
-export function formatCurrency(amount: number): string {
-  return new Intl.NumberFormat('en-US', {
+export function formatCurrency(amount: number, currency?: string): string {
+  const curr = currency || getDeviceCurrency();
+  return new Intl.NumberFormat(undefined, {
     style: 'currency',
-    currency: 'USD',
+    currency: curr,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
   }).format(amount);
 }
 
-// Test card numbers for sandbox testing
 export const TEST_CARDS = [
-  { number: '4242 4242 4242 4242', label: 'Visa — Success' },
-  { number: '4000 0000 0000 9995', label: 'Visa — Declined' },
-  { number: '4000 0025 0000 3155', label: 'Visa — Requires Auth' },
+  { number: '4242 4242 4242 4242', label: 'Visa - Success' },
+  { number: '4000 0000 0000 9995', label: 'Visa - Declined' },
+  { number: '4000 0025 0000 3155', label: 'Visa - Requires Auth' },
 ];

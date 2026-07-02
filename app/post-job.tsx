@@ -1,20 +1,23 @@
 import React, { useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, KeyboardAvoidingView, Platform } from 'react-native';
+import { ActivityIndicator, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, KeyboardAvoidingView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { COLORS, SPACING, BORDER_RADIUS } from '../lib/constants';
+import { getCustomServiceCategory, getServiceCategoryLabel, matchServiceCategory, SERVICE_CATEGORY_OPTIONS } from '../lib/serviceCategories';
 import { useAppStore } from '../store/useAppStore';
+import { useThemedAlert } from '../components/ui/ThemedAlertProvider';
 
-const CATEGORIES = ['Plumbing', 'Electrical', 'Hair', 'Tailoring', 'Shoes', 'Cleaning', 'Auto', 'Repairs', 'Roofing', 'Carpentry'];
 const URGENCY = ['Today', 'This week', 'Flexible'];
 const BUDGETS = ['$100-$250', '$250-$500', '$500-$1k', '$1k+'];
+const COMPACT_CATEGORY_OPTIONS = SERVICE_CATEGORY_OPTIONS.slice(0, 6);
 
 export default function PostJobScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ category?: string }>();
-  const { user, isAuthenticated, authInitialized, addJob } = useAppStore();
-  const [category, setCategory] = useState(params.category || 'Plumbing');
+  const { user, isAuthenticated, authInitialized, setActiveRole, addJob } = useAppStore();
+  const themedAlert = useThemedAlert();
+  const [category, setCategory] = useState(params.category || '');
   const [urgency, setUrgency] = useState('This week');
   const [budget, setBudget] = useState('$250-$500');
   const [title, setTitle] = useState('');
@@ -28,10 +31,18 @@ export default function PostJobScreen() {
   }, [address, budget, category, details, title, urgency]);
 
   const submitRequest = () => {
-    if (!title || !details || !address) {
-      Alert.alert('A little more detail', 'Add a title, request details, and location so pros can quote accurately.');
+    const categoryInput = category.trim();
+    if (!categoryInput || !title || !details || !address) {
+      themedAlert.show({
+        title: 'A little more detail',
+        message: 'Add a service category, title, request details, and location so pros can quote accurately.',
+        icon: 'clipboard-text-outline',
+      });
       return;
     }
+    const matchedCategory = matchServiceCategory(categoryInput);
+    const customCategory = getCustomServiceCategory(categoryInput);
+    const categoryLabel = getServiceCategoryLabel(matchedCategory, customCategory);
     if (!authInitialized) return;
     if (isAuthenticated && user?.role === 'customer') {
       addJob({
@@ -44,15 +55,45 @@ export default function PostJobScreen() {
         estimatedHours: 1,
         status: 'scheduled',
         address,
-        notes: `${category} request. Budget: ${budget}. Timing: ${urgency}.`,
+        category: matchedCategory,
+        customCategory,
+        budgetRange: budget,
+        urgency,
+        notes: `${categoryLabel} request. Budget: ${budget}. Timing: ${urgency}.`,
         createdAt: new Date().toISOString(),
       });
-      Alert.alert('Request posted', 'Your request is live. Pros can now review it and send quotes.');
+      themedAlert.show({
+        title: 'Request posted',
+        message: 'Your request is live. Pros can now review it and send quotes.',
+        icon: 'check-circle-outline',
+      });
       router.replace('/customer-home');
       return;
     }
     if (isAuthenticated) {
-      Alert.alert('Customer account needed', 'Switch to a customer account to request quotes from service pros.');
+      if (user?.roles?.includes('customer')) {
+        themedAlert.show({
+          title: 'Switch to customer mode?',
+          message: 'Posting a job is a customer action. Switch modes and continue?',
+          icon: 'home-search-outline',
+          actions: [
+          {
+            label: 'Switch',
+            icon: 'swap-horizontal',
+            onPress: async () => {
+              await setActiveRole('customer');
+            },
+          },
+          { label: 'Cancel', variant: 'ghost' },
+          ],
+        });
+        return;
+      }
+      themedAlert.show({
+        title: 'Customer mode needed',
+        message: 'Add customer mode to this account to request quotes from service pros.',
+        icon: 'home-plus-outline',
+      });
       return;
     }
     router.push({ pathname: '/(auth)/signup', params: { role: 'customer', next: nextRoute } });
@@ -101,16 +142,29 @@ export default function PostJobScreen() {
 
         <View style={styles.section}>
           <Text style={styles.label}>Service category</Text>
+          <View style={styles.inputRow}>
+            <MaterialCommunityIcons name="briefcase-search-outline" size={20} color={COLORS.textMuted} />
+            <TextInput
+              style={styles.categoryInput}
+              placeholder="Type anything: nail tech, tutor, mechanic..."
+              placeholderTextColor={COLORS.textMuted}
+              value={category}
+              onChangeText={setCategory}
+            />
+          </View>
+          <Text style={styles.helperText}>Type the service you need. Common examples:</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
-            {CATEGORIES.map(item => (
+            {COMPACT_CATEGORY_OPTIONS.map(item => {
+              const active = category.trim().toLowerCase() === item.label.toLowerCase();
+              return (
               <TouchableOpacity
-                key={item}
-                style={[styles.chip, category === item && styles.chipActive]}
-                onPress={() => setCategory(item)}
+                key={item.value}
+                style={[styles.chip, active && styles.chipActive]}
+                onPress={() => setCategory(item.label)}
               >
-                <Text style={[styles.chipText, category === item && styles.chipTextActive]}>{item}</Text>
+                <Text style={[styles.chipText, active && styles.chipTextActive]}>{item.label}</Text>
               </TouchableOpacity>
-            ))}
+            );})}
           </ScrollView>
         </View>
 
@@ -189,7 +243,7 @@ export default function PostJobScreen() {
         <View style={styles.previewCard}>
           <Text style={styles.previewTitle}>Service pro preview</Text>
           <Text style={styles.previewJob}>{title || 'Your job title will appear here'}</Text>
-          <Text style={styles.previewMeta}>{category} · {urgency} · {budget}</Text>
+          <Text style={styles.previewMeta}>{category.trim() || 'Service category'} - {urgency} - {budget}</Text>
           <Text style={styles.previewBody} numberOfLines={3}>
             {details || 'Add a clear description so nearby pros know whether the job is a good fit.'}
           </Text>
@@ -232,6 +286,9 @@ const styles = StyleSheet.create({
   progressHint: { fontSize: 12, color: COLORS.textMuted, lineHeight: 17 },
   section: { gap: SPACING.sm },
   label: { fontSize: 13, color: COLORS.textSecondary, fontWeight: '800' },
+  inputRow: { minHeight: 52, flexDirection: 'row', alignItems: 'center', gap: SPACING.sm, paddingHorizontal: SPACING.md, backgroundColor: COLORS.surface, borderRadius: BORDER_RADIUS.md, borderWidth: 1, borderColor: COLORS.border },
+  categoryInput: { flex: 1, color: COLORS.text, fontSize: 15, paddingVertical: 12 },
+  helperText: { fontSize: 12, color: COLORS.textMuted, fontWeight: '700' },
   chipRow: { gap: SPACING.sm, paddingRight: SPACING.lg },
   chip: { paddingHorizontal: SPACING.md, paddingVertical: 10, borderRadius: BORDER_RADIUS.full, backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.border },
   chipActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },

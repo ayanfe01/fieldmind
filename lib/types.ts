@@ -22,12 +22,15 @@ export type PricingMode = 'hourly' | 'fixed' | 'quote';
 export interface User {
   id: string;
   role: UserRole;
+  roles?: UserRole[];
   name: string;
   email: string;
   phone: string;
   createdAt: string;
   // Tradesperson fields
   trade?: TradeType;
+  trades?: TradeType[];
+  customTrade?: string;
   businessName?: string;
   hourlyRate?: number;
   fixedRate?: number;
@@ -62,6 +65,13 @@ export interface Quote {
   status: QuoteStatus; notes?: string; validUntil: string; createdAt: string;
   paymentTerms?: PaymentTermsType;
   depositPercent?: number;
+  // Public share link (quote-link edge function)
+  shareToken?: string;
+  sentAt?: string;
+  viewedAt?: string;
+  acceptedAt?: string;
+  declinedAt?: string;
+  signedName?: string;
 }
 
 export interface Invoice {
@@ -89,10 +99,19 @@ export interface MediaItem {
 export type EscrowStatus = 'holding' | 'released' | 'disputed';
 
 export interface Job {
-  id: string; clientId: string; client?: Client; title: string; description: string;
+  id: string; ownerId?: string; clientId: string; client?: Client; title: string; description: string;
   scheduledDate: string; scheduledTime: string; estimatedHours: number;
   status: JobStatus; address: string; quoteId?: string; invoiceId?: string;
+  assignedProId?: string;
+  assignedProName?: string;
+  assignedAt?: string;
+  category?: TradeType;
+  customCategory?: string;
+  budgetRange?: string;
+  urgency?: string;
   notes?: string; createdAt: string;
+  completedAt?: string;
+  invoiceSentAt?: string;
   customerMedia?: MediaItem[];
   completionMedia?: MediaItem[];
   escrowStatus?: EscrowStatus;
@@ -100,11 +119,29 @@ export interface Job {
   paymentMethod?: 'stripe' | 'cash';
 }
 
+export interface Rating {
+  id: string;
+  jobId: string;
+  invoiceId?: string;
+  raterId: string;      // who left the rating
+  raterName: string;
+  ratedUserId: string;  // who received the rating (pro's userId)
+  stars: number;        // 1–5
+  review?: string;
+  createdAt: string;
+}
+
 export interface Conversation {
   id: string;
+  ownerId?: string;
+  initiatorName?: string;
+  initiatorPhoto?: string | null;
   participantId: string;
   participantName: string;
+  participantPhoto?: string | null;
   participantRole: UserRole;
+  participantUserIds?: string[];
+  jobId?: string;
   subject?: string;
   quoteRequested?: boolean;
   lastMessage?: string;
@@ -118,6 +155,22 @@ export interface ChatMessage {
   senderId: string;
   senderName: string;
   text: string;
+  mediaUri?: string;
+  mediaType?: 'image';
+  actionType?: 'invoice_payment' | 'quote_review' | 'booking_confirmed' | 'quote_declined';
+  actionLabel?: string;
+  actionPayload?: {
+    invoiceId?: string;
+    quoteId?: string;
+    amount?: number;
+    depositAmount?: number;
+    depositPercent?: number;
+    type?: 'deposit' | 'final';
+    address?: string;
+    preferredDate?: string;
+    preferredTime?: string;
+    notes?: string;
+  };
   createdAt: string;
 }
 

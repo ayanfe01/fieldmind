@@ -39,7 +39,7 @@ export default function ChatRoomScreen() {
   const router = useRouter();
   const themedAlert = useThemedAlert();
   const { conversationId, draft: initialDraft } = useLocalSearchParams<{ conversationId: string; draft?: string }>();
-  const { conversations, messages, jobs, quotes, clients, addClient, addJob, addQuote, addInvoice, assignJobToPro, addMessage, updateQuote, user, profilePhoto, refreshCloudData } = useAppStore();
+  const { conversations, messages, jobs, invoices, quotes, clients, addClient, addJob, addQuote, addInvoice, assignJobToPro, addMessage, updateQuote, user, profilePhoto, refreshCloudData } = useAppStore();
   const [draft, setDraft] = useState(initialDraft || '');
   const [pendingPhoto, setPendingPhoto] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -178,6 +178,21 @@ export default function ChatRoomScreen() {
         createdAt: new Date().toISOString(),
       });
       closeBookingFlow();
+      // If there's an invoice/deposit for this booking, prompt the customer to pay
+      if (bookingPayload.depositAmount && bookingPayload.depositAmount > 0) {
+        const linkedInvoice = invoices.find(inv => inv.quoteId === bookingPayload.quoteId);
+        if (linkedInvoice) {
+          themedAlert.show({
+            title: 'Booking confirmed!',
+            message: `A deposit of ${formatCurrency(bookingPayload.depositAmount)} is required to secure your booking.`,
+            icon: 'shield-check-outline',
+            actions: [
+              { label: 'Pay Deposit Now', icon: 'cash-fast', onPress: () => router.push({ pathname: '/payment', params: { invoiceId: linkedInvoice.id, type: 'deposit' } }) },
+              { label: 'Pay Later', variant: 'ghost' },
+            ],
+          });
+        }
+      }
     } catch {
       themedAlert.show({ title: 'Booking failed', message: 'Could not confirm the booking. Please try again.', icon: 'calendar-alert' });
     } finally {
@@ -382,14 +397,21 @@ export default function ChatRoomScreen() {
 
   const openMessageAction = (message: typeof threadMessages[number]) => {
     if (message.actionType === 'invoice_payment' && message.actionPayload?.invoiceId) {
+      // Route to the detail view first — customer sees what they're paying for there
       router.push({
-        pathname: '/payment',
+        pathname: '/invoice-view',
         params: {
           invoiceId: message.actionPayload.invoiceId,
           type: message.actionPayload.type,
         },
       });
       return;
+    }
+    if (message.actionType === 'quote_review' && message.actionPayload?.quoteId) {
+      router.push({
+        pathname: '/invoice-view',
+        params: { quoteId: message.actionPayload.quoteId },
+      });
     }
   };
 
@@ -492,8 +514,8 @@ export default function ChatRoomScreen() {
                       <View style={[styles.actionCard, isMine ? styles.actionCardMine : styles.actionCardTheirs]}>
                         <TouchableOpacity
                           style={styles.actionCardInner}
-                          activeOpacity={isInvoice ? 0.85 : 1}
-                          disabled={!isInvoice}
+                          activeOpacity={(isInvoice || message.actionType === 'quote_review') ? 0.85 : 1}
+                          disabled={!isInvoice && message.actionType !== 'quote_review'}
                           onPress={() => openMessageAction(message)}
                         >
                           <View style={[styles.actionIcon, isQuoteDeclined && styles.actionIconDanger]}>
@@ -516,7 +538,7 @@ export default function ChatRoomScreen() {
                           </View>
                           <View style={[styles.actionButton, isQuoteDeclined && styles.actionButtonDanger, isBookingConfirmed && styles.actionButtonSuccess]}>
                             <Text style={styles.actionButtonText}>
-                              {isInvoice ? 'Pay' : isBookingConfirmed ? 'Confirmed' : isQuoteDeclined ? 'Declined' : 'Sent'}
+                              {isInvoice ? 'View' : isBookingConfirmed ? 'Confirmed' : isQuoteDeclined ? 'Declined' : message.actionType === 'quote_review' ? 'View' : 'Sent'}
                             </Text>
                           </View>
                         </TouchableOpacity>

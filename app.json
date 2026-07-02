@@ -3,12 +3,17 @@
     "name": "FieldMind",
     "slug": "fieldmind",
     "version": "1.0.0",
+    "platforms": ["ios", "android"],
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.fieldmind.app"
+      "bundleIdentifier": "com.fieldmind.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "FieldMind uses your camera so you can take a profile photo and add job photos.",
+        "NSPhotoLibraryUsageDescription": "FieldMind uses your photo library so you can choose a profile photo and add job photos."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -33,7 +38,8 @@
           "enableGooglePay": true
         }
       ],
-      "expo-web-browser"
+      "expo-web-browser",
+      "expo-font"
     ],
     "scheme": "fieldmind",
     "extra": {
